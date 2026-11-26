@@ -237,6 +237,7 @@ class Tone:
     gamma: float
     neutralize: bool
     brightness: float
+    curve: dict | None = None
 
     @classmethod
     def read(cls, value):
@@ -245,18 +246,74 @@ class Tone:
         highlight = number(value.get("highlight", DEFAULT_DENSITY_RANGE[1]), "tone.highlight", lower=-.35, upper=3.6)
         if highlight - shadow < .025:
             raise DeskError("Move the highlight at least 0.025 density above the shadow.", field="tone.highlight")
+        raw_curve = value.get("curve")
+        curve = _read_tone_curve(raw_curve) if raw_curve not in (None, False) else None
         return cls(
             shadow, highlight,
             number(value.get("gamma", 1), "tone.gamma", lower=.35, upper=3),
             boolean(value.get("neutralize", False), "tone.neutralize"),
             number(value.get("brightness", 0), "tone.brightness", lower=-.4, upper=.4),
+            curve,
         )
 
     def as_dict(self):
-        return {
+        result = {
             "shadow": self.shadow, "highlight": self.highlight, "gamma": self.gamma,
             "neutralize": self.neutralize, "brightness": self.brightness,
         }
+        if self.curve is not None:
+            result["curve"] = self.curve
+        return result
+
+
+def _read_tone_curve(raw):
+    """Validate an adopted shared monotone curve (knots or a LUT)."""
+    value = mapping(raw, "tone.curve")
+    knots = value.get("knots", value.get("points"))
+    if knots:
+        if not isinstance(knots, (list, tuple)) or len(knots) < 2:
+            raise DeskError("The tone curve needs at least two control points.", field="tone.curve")
+        try:
+            points = [(float(point[0]), float(point[1])) for point in knots]
+        except (TypeError, ValueError, IndexError) as error:
+            raise DeskError("Tone curve points must be [x, y] pairs.", field="tone.curve") from error
+        xs = [point[0] for point in points]
+        if any(right < left for left, right in zip(xs, xs[1:])):
+            raise DeskError("The shared tone curve must be monotone.", field="tone.curve")
+    elif value.get("lut"):
+        lut = value["lut"]
+        if not isinstance(lut, (list, tuple)) or len(lut) < 4:
+            raise DeskError("The tone curve LUT needs at least four entries.", field="tone.curve")
+        try:
+            [float(entry) for entry in lut]
+        except (TypeError, ValueError) as error:
+            raise DeskError("Tone curve LUT entries must be numbers.", field="tone.curve") from error
+    else:
+        raise DeskError("The tone curve needs knots or a LUT.", field="tone.curve")
+    return value
+
+
+def _apply_shared_curve(calibrated, tone, medium):
+    curve = tone.curve
+    domain = curve.get("domain", "density") if isinstance(curve, dict) else "density"
+    knots = curve.get("knots", curve.get("points"))
+    if knots:
+        xs = np.asarray([float(point[0]) for point in knots], dtype=np.float32)
+        ys = np.asarray([float(point[1]) for point in knots], dtype=np.float32)
+        order = np.argsort(xs)
+        xs, ys = xs[order], ys[order]
+    else:
+        lut = np.asarray(curve["lut"], dtype=np.float32)
+        xmin = float(curve.get("x_min", 0.0))
+        xmax = float(curve.get("x_max", 1.0))
+        xs = np.linspace(xmin, xmax, len(lut), dtype=np.float32)
+        ys = lut
+    if domain in ("value", "level", "gray", "grey"):
+        coordinate = calibrated.values if medium != "negative" else 1.0 - calibrated.values
+    else:
+        coordinate = calibrated.density
+    flat = np.interp(coordinate.reshape(-1), xs, ys)
+    return np.clip(flat.reshape(coordinate.shape), 0, 1).astype(np.float32)
 
 
 def apply_calibration(scan, calibration, *, flat=None, dark=None):
@@ -294,6 +351,8 @@ def _near_gray(values, valid):
 
 
 def positive_pixels(calibrated, tone, medium):
+    if getattr(tone, "curve", None):
+        return _apply_shared_curve(calibrated, tone, medium)
     density = calibrated.density
     valid = calibrated.valid
     if tone.neutralize:

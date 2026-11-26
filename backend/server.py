@@ -281,6 +281,31 @@ def register_imaging(app, services):
     def analyze(scan_id):
         return jsonify(operations.run(scan_id, _body()).summary()), 201
 
+    def _named_operation(scan_id, kind):
+        payload = _body()
+        payload.setdefault("kind", kind)
+        return jsonify(operations.run(scan_id, payload).summary()), 201
+
+    @app.post("/api/scans/<scan_id>/strip-grade")
+    def strip_grade_endpoint(scan_id):
+        return _named_operation(scan_id, "strip-grade")
+
+    @app.post("/api/scans/<scan_id>/grade")
+    def grade_endpoint(scan_id):
+        return _named_operation(scan_id, "strip-grade")
+
+    @app.post("/api/scans/<scan_id>/reference-grade")
+    def reference_grade_endpoint(scan_id):
+        return _named_operation(scan_id, "strip-grade")
+
+    @app.post("/api/scans/<scan_id>/proof-check")
+    def proof_check_endpoint(scan_id):
+        return _named_operation(scan_id, "proof-audit")
+
+    @app.post("/api/scans/<scan_id>/proof-audit")
+    def proof_audit_endpoint(scan_id):
+        return _named_operation(scan_id, "proof-audit")
+
     @app.get("/api/jobs/<job_id>")
     def job_summary(job_id):
         return jsonify(operations.jobs.get(job_id).summary())

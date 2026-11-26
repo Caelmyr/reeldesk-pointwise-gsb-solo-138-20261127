@@ -32,6 +32,15 @@ const presentation = {
     ["Green encoded samples", x.channels.G.samples], ["Outside range", x.outside_range]],
   masters: x => [["Native crops", x.files.length], ["Format", x.format.toUpperCase()]],
   carrier: x => [["Carrier status", x.status], ["Width", p(x.width_mm, 4, " mm")], ["Rail support", asPercent(x.support_fraction)]],
+  "strip-grade": x => [
+    ["Pairs held", `${x.recognized} / ${x.total_pairs}`],
+    ["Discarded", x.discarded.length ? x.discarded.join(", ") : "none"],
+    ["Paper range", `${x.paper.black_8bit}–${x.paper.white_8bit}`],
+    ["Proof losses", x.proof_check ? x.proof_check.lost.length : "—"],
+    ["Protected texture", x.protected ? (x.protected.preserved ? "retained" : "thin") : "—"],
+  ],
+  "proof-audit": x => [["Proof losses", x.grade_audit?.lost?.length ?? 0],
+    ["Proof size", x.grade_audit ? `${x.grade_audit.proof_width}×${x.grade_audit.proof_height}` : "—"]],
 };
 
 function graph(data, colors, seriesNames, width = 560, height = 160) {
@@ -137,7 +146,92 @@ function extendedTable(kind, data, state, actions, interactive) {
     data.files.map(item => [item.file, item.output_mode, `${item.export_region.w} × ${item.export_region.h}`]));
   if (kind === "grain") return table(["Radius", "Samples", "MAD", "P95"], data.bands.map(item =>
     [item.radius, item.samples, p(item.mad), p(item.p95)]));
+  if (kind === "strip-grade") return stripGradeView(data, actions, interactive);
+  if (kind === "proof" && data.grade_audit) return proofGradeAudit(data.grade_audit);
+  if (kind === "proof-audit") return proofGradeAudit(data.grade_audit);
   return null;
+}
+
+function gradeCurveChart(curve) {
+  const knots = curve.knots || curve.points || [];
+  const width = 560;
+  const height = 170;
+  const canvas = h("canvas", {width, height, class: "result-chart", "aria-label": "Shared monotone tone curve"});
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#191a16";
+  ctx.fillRect(0, 0, width, height);
+  if (knots.length < 2) return canvas;
+  const xs = knots.map(point => point[0]);
+  const minX = Math.min(...xs);
+  const maxX = Math.max(...xs);
+  const spanX = Math.max(1e-6, maxX - minX);
+  const plot = {x: 36, y: 12, w: width - 48, h: height - 34};
+  ctx.strokeStyle = "#4d4a3e";
+  for (let row = 0; row <= 4; row++) {
+    const y = plot.y + plot.h * row / 4;
+    ctx.beginPath(); ctx.moveTo(plot.x, y); ctx.lineTo(plot.x + plot.w, y); ctx.stroke();
+  }
+  const mapX = value => plot.x + (value - minX) / spanX * plot.w;
+  const mapY = value => plot.y + plot.h * (1 - Math.max(0, Math.min(1, value)));
+  ctx.strokeStyle = "#e6cf9b";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  knots.forEach(([x, y], index) => {
+    if (index) ctx.lineTo(mapX(x), mapY(y)); else ctx.moveTo(mapX(x), mapY(y));
+  });
+  ctx.stroke();
+  ctx.fillStyle = "#9fc3fc";
+  knots.forEach(([x, y]) => { ctx.beginPath(); ctx.arc(mapX(x), mapY(y), 2.6, 0, Math.PI * 2); ctx.fill(); });
+  ctx.fillStyle = "#ab9c87";
+  ctx.font = "10px sans-serif";
+  ctx.fillText(`paper ${curve.paper_black ?? ""}–${curve.paper_white ?? ""}`, plot.x, height - 8);
+  ctx.fillText("shared R=G=B curve", plot.x + plot.w - 120, 14);
+  return canvas;
+}
+
+function stripGradeView(data, actions, interactive) {
+  const pairRows = data.pairs.map(item => [
+    item.label,
+    item.dark_median === undefined ? "—" : Math.round(item.dark_median * 255),
+    item.bright_median === undefined ? "—" : Math.round(item.bright_median * 255),
+    Math.round(item.contrast * 255),
+    item.minimum_8bit,
+    item.kept ? "kept" : `discarded · ${(item.reason || "conflict").replaceAll("_", " ")}`,
+  ]);
+  const nodes = [
+    gradeCurveChart(data.curve),
+    table(["Pair", "Dark 8b", "Bright 8b", "Δ 8b", "Min 8b", "Verdict"], pairRows),
+  ];
+  if (data.protected) {
+    const keep = data.protected.boxes?.[0] || data.protected;
+    nodes.push(h("p", {class: "muted result-details"},
+      `Protected texture output spread ${keep.output_spread ?? "—"} (${keep.retained_fraction !== undefined ? Math.round(keep.retained_fraction * 100) + "% retained" : "tie-break used"}).`));
+  }
+  if (data.proof_check) nodes.push(proofGradeAudit(data.proof_check));
+  if (interactive) {
+    nodes.push(h("div", {class: "stack"},
+      button("Adopt curve for Archive proof", () => actions.adoptGrade(data), "primary"),
+      button("Open Archive · Make scan proof", () => actions.openArchive(), "quiet")));
+  }
+  return nodes;
+}
+
+function proofGradeAudit(audit) {
+  if (!audit?.pairs?.length) return null;
+  const rows = audit.pairs.map(item => [
+    item.label,
+    `${audit.proof_width}×${audit.proof_height}`,
+    Math.round(item.contrast * 255),
+    item.minimum_8bit,
+    item.separable_pixels,
+    item.lost_after_resize ? "lost after resize" : item.contrast_ok ? "holds" : "below target",
+  ]);
+  return [
+    audit.lost.length
+      ? h("p", {class: "error"}, `Originally sufficient but lost on the sized proof: ${audit.lost_labels.join(", ")}`)
+      : h("p", {class: "muted"}, "All adopted pairs remain separable on the sized proof."),
+    table(["Pair", "Proof px", "Δ 8b", "Min 8b", "Witness px", "Proof verdict"], rows),
+  ];
 }
 
 function filesFor(entry, saved) {

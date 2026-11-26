@@ -1,4 +1,4 @@
-import {button, checkbox, describeDate, h, input, link, message, numberField as num, properties, section, select} from "./ui.js";
+import {button, checkbox, describeDate, h, input, link, message, numberField as num, properties, section, select, table} from "./ui.js";
 
 const channels = ["R", "G", "B"];
 const props = properties;
@@ -158,11 +158,19 @@ function stripDesk(state, actions) {
 
 function archiveDesk(state, actions) {
   const saved = state.records ?? [];
+  const adopted = state.adoptedGrade;
   return [
     section("Proof and contact sheet",
+      adopted
+        ? message(`Adopted strip curve active · ${adopted.recognized}/${adopted.total_pairs} reference pairs held. Make the proof to re-check them at the finished size.`)
+        : message("Tip: build and adopt a Unified strip grade in the Strip tab to re-check reference pairs on the sized proof."),
+      adopted ? null : button("Open Unified strip grade", actions.openStrip, "quiet"),
       form(element => actions.run("proof", element), "Make scan proof", [
+        num("max_side", "Finished image long side (px)", state.proofSize || 1800, 480, 3000, 20),
         checkbox("annotate", "Show saved marks", true),
         checkbox("include_histogram", "Include density distribution", false),
+        adopted ? checkbox("grade_audit", "Re-check adopted reference pairs at this size", true) : null,
+        adopted ? button("Clear adopted curve", actions.clearAdoptedGrade, "text-button") : null,
       ]),
       h("details", {}, h("summary", {}, "Roll contact sheet"),
         form(element => actions.run("contact", element), "Make contact sheet", [
@@ -189,10 +197,53 @@ function archiveDesk(state, actions) {
   ];
 }
 
+function gradePairBuilder(state, actions) {
+  const boxMarks = state.marks.filter(mark => mark.geometry && Number.isFinite(mark.geometry.x));
+  const options = [
+    ...(state.box ? [["drawn", "Current drawn region"]] : []),
+    ...boxMarks.map(mark => [mark.id, `${mark.kind} · ${mark.label}`]),
+  ];
+  const keepMarks = boxMarks.filter(mark => mark.kind === "keep");
+  return section("Unified strip grade",
+    message("Name dark and bright Reference boxes for the same strip. One monotone RGB curve is fitted across every frame and checked by transformed RGB-luma medians."),
+    state.gradePairs.length
+      ? table(["Pair", "Dark box", "Bright box", "Min Δ", ""], state.gradePairs.map((pair, index) => [
+          pair.label,
+          `${pair.dark.x},${pair.dark.y} · ${pair.dark.w}×${pair.dark.h}`,
+          `${pair.bright.x},${pair.bright.y} · ${pair.bright.w}×${pair.bright.h}`,
+          `${Math.round(pair.minimum * 255)}`,
+          button("Remove", () => actions.removeGradePair(index), "text-button"),
+        ]))
+      : message("No pairs yet. Add Reference marks or draw the two boxes."),
+    form(formElement => actions.addGradePair(formElement), "Add reference pair", [
+      input("label", "Pair label", `Texture ${state.gradePairs.length + 1}`, {maxlength: 60}),
+      select("dark_ref", "Dark texture box", options, state.box ? "drawn" : (boxMarks[0]?.id ?? ""), {required: true}),
+      select("bright_ref", "Bright texture box", options, state.box ? "" : (boxMarks[1]?.id ?? boxMarks[0]?.id ?? ""), {required: true}),
+      num("minimum", "Required grey gap (0–255)", 28, 2, 200, 1),
+    ], "quiet"),
+    form(element => actions.run("strip-grade", element), "Build unified curve", [
+      props("columns-2",
+        num("paper_black", "Paper black (0–255)", state.gradePaper.black8, 0, 120, 1),
+        num("paper_white", "Paper white (0–255)", state.gradePaper.white8, 120, 255, 1)),
+      props("columns-2",
+        num("proof_size", "Proof size, long side (px)", 1200, 240, 3000, 10),
+        select("keep_ref", "Protected texture", [
+          ["auto", "Saved keep marks (auto)"],
+          ...keepMarks.map(mark => [mark.id, mark.label]),
+          ["none", "No protected texture"],
+        ], "auto")),
+      message("When the paper range cannot fund every gap, the curve keeps the largest possible number of pairs and favours the protected texture."),
+    ]),
+    state.adoptedGrade
+      ? message(`Adopted curve · ${state.adoptedGrade.recognized}/${state.adoptedGrade.total_pairs} pairs held · use Archive ▸ Make scan proof.`)
+      : null,
+  );
+}
+
 export function panelNodes(state, actions) {
   if (!state.scan) return [message("Select or import a scan to work with film." )];
   if (state.tab === "repeat") return repeatPass(state, actions);
-  if (state.tab === "strip") return stripDesk(state, actions);
+  if (state.tab === "strip") return [gradePairBuilder(state, actions), ...stripDesk(state, actions)];
   if (state.tab === "archive") return archiveDesk(state, actions);
   return [standardReading(state, actions), calibrationOptions(state, actions), imagingStudies(state, actions)];
 }

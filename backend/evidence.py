@@ -53,6 +53,8 @@ KIND_TITLES = {
     "coverage": "Scanner coverage",
     "masters": "Frame masters",
     "carrier": "Carrier rails",
+    "strip-grade": "Unified strip grade",
+    "proof-audit": "Proof-size pair check",
 }
 
 
@@ -237,7 +239,8 @@ def _draw_histogram(drawer, table, left, top, width, height):
         drawer.line(points, fill=color, width=2)
 
 
-def scan_proof(image, scan, roll, region, view, settings, *, marks=(), histogram=None):
+def scan_proof(image, scan, roll, region, view, settings, *, marks=(), histogram=None,
+               grade_audit=None):
     width, height = image.size
     image = image.copy()
     image.thumbnail((settings.max_side, settings.max_side), Image.Resampling.LANCZOS)
@@ -257,11 +260,17 @@ def scan_proof(image, scan, roll, region, view, settings, *, marks=(), histogram
     source_text = f"Source x {region.x}, y {region.y}  ·  {region.w} × {region.h} px  ·  {scan['checksum'][:12]}"
     _draw_caption(drawer, (pad, y + 18), source_text, _font(11), canvas.width - 2 * pad, fill=MUTED_COLOR)
     count = _proof_marks(drawer, marks, region, left, header, image.width / region.w, image.height / region.h) if settings.annotate else 0
+    grade_marked = 0
+    if grade_audit:
+        from .strip_grade import draw_proof_warnings
+        # The audit was measured on the clean downscaled photo; only now do we
+        # paint its warning markers, so marker colours never become detail.
+        grade_marked = draw_proof_warnings(canvas, grade_audit, left=left, top=header)
     bar = _proof_scale(drawer, (pad, y + 42), image.width, region.w, scan["dpi"]) if settings.scale_bar else None
     if panel:
         drawer.text((pad, y + 61), "Density distribution", font=_font(11), fill=MUTED_COLOR)
         _draw_histogram(drawer, histogram, pad, y + 77, canvas.width - 2 * pad, 43)
-    return canvas, {
+    result = {
         "width": canvas.width,
         "height": canvas.height,
         "type": view,
@@ -271,6 +280,9 @@ def scan_proof(image, scan, roll, region, view, settings, *, marks=(), histogram
         "density_histogram": bool(panel),
         "source_pixels_per_preview_pixel": round(width / image.width, 4),
     }
+    if grade_audit is not None:
+        result["grade_lost_marked"] = grade_marked
+    return canvas, result
 
 
 @dataclass(frozen=True)

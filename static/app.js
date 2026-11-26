@@ -11,6 +11,7 @@ const state = {
   lastDust: null, restore: new Set(), pickedDust: null,
   calibration: cleanCalibration(), peerCalibration: cleanCalibration(),
   tone: {shadow: .08, highlight: 1.75, gamma: 1, neutralize: false, brightness: 0},
+  gradePairs: [], gradePaper: {black8: 14, white8: 242}, adoptedGrade: null, proofSize: 1800,
   preview: null, requestId: 0, previewRequest: null, loadId: 0, working: false,
 };
 
@@ -343,6 +344,12 @@ async function selectScan(scan, {persist = true} = {}) {
   state.lastDust = null;
   state.restore.clear();
   state.pickedDust = null;
+  state.gradePairs = [];
+  state.adoptedGrade = null;
+  if (state.tone?.curve) {
+    const {curve, ...tone} = state.tone;
+    state.tone = tone;
+  }
   state.mode = scan?.role === "scan" ? "positive" : "raw";
   state.tool = "box";
   state.cutOptions = {kerf_mm: .16, reserve_mm: .7, retained: "both"};
@@ -436,8 +443,27 @@ function operationArgs(kind, element, overrides) {
     }
     case "cut-verified": return {kind, cut: state.cutOptions, planned: state.cutPlan, actual: needLine()};
     case "frames": case "perforations": case "carrier": return {kind, region};
-    case "proof": return {...base, region, tone: state.tone, view: state.mode,
-      proof: {annotate: fields.annotate === "on", include_histogram: fields.include_histogram === "on"}};
+    case "proof": {
+      state.proofSize = +fields.max_side || 1800;
+      const payload = {...base, region, tone: state.tone, view: state.mode,
+        proof: {max_side: state.proofSize, annotate: fields.annotate === "on",
+          include_histogram: fields.include_histogram === "on"}};
+      if (state.adoptedGrade && fields.grade_audit === "on") payload.grade = state.adoptedGrade;
+      return payload;
+    }
+    case "strip-grade": {
+      state.gradePaper = {black8: +fields.paper_black || 14, white8: +fields.paper_white || 242};
+      const keepRef = fields.keep_ref || "auto";
+      const payload = {
+        kind, calibration, domain: "density",
+        paper: {black: state.gradePaper.black8, white: state.gradePaper.white8},
+        pairs: state.gradePairs.map(pair => ({...pair})),
+        proof_max_side: +fields.proof_size || 1200,
+      };
+      if (keepRef === "none") payload.use_saved_keep = false;
+      else if (keepRef !== "auto") payload.keep = keepRef;
+      return payload;
+    }
     case "density-master": return {...base, region, density_export: {
       minimum: +fields.minimum, maximum: +fields.maximum, clip_outside: fields.clip_outside === "on",
     }};
@@ -448,9 +474,14 @@ function operationArgs(kind, element, overrides) {
   }
 }
 
+function flatNodes(nodes) {
+  return nodes.flat(Infinity).filter(node =>
+    node !== null && node !== undefined && node !== false && node !== true);
+}
+
 function showResult(entry, saved = false) {
   const result = $("result-section");
-  result.replaceChildren(...resultNodes(entry, state, actions, saved));
+  result.replaceChildren(...flatNodes(resultNodes(entry, state, actions, saved)));
   result.hidden = false;
   result.scrollIntoView({block: "nearest", behavior: "instant"});
 }
@@ -778,6 +809,66 @@ async function setTone(form) {
   renderPanel();
 }
 
+function geometryFromRef(reference) {
+  if (reference === "drawn") return needBox();
+  const mark = state.marks.find(item => item.id === reference);
+  if (!mark?.geometry || mark.geometry.x === undefined) {
+    throw Error("Choose a saved box mark or draw the region first.");
+  }
+  return mark.geometry;
+}
+
+function addGradePair(form) {
+  const fields = formValues(form);
+  const dark = geometryFromRef(fields.dark_ref);
+  const bright = geometryFromRef(fields.bright_ref);
+  const gap8 = Math.min(200, Math.max(2, +fields.minimum || 28));
+  state.gradePairs.push({
+    id: `ui-pair-${state.gradePairs.length + 1}-${Date.now().toString(36)}`,
+    label: fields.label || `Texture ${state.gradePairs.length + 1}`,
+    dark, bright, minimum: gap8 / 255,
+  });
+  renderPanel();
+  toast("Reference pair added.");
+}
+
+function removeGradePair(index) {
+  state.gradePairs.splice(index, 1);
+  renderPanel();
+}
+
+async function adoptGrade(result) {
+  state.adoptedGrade = result;
+  state.tone = {...state.tone, curve: result.curve};
+  state.mode = "positive";
+  setActive("view-modes", "view", state.mode);
+  renderHeader();
+  renderPanel();
+  await updatePreview();
+  renderPanel();
+  toast("Unified curve adopted. Open Archive ▸ Make scan proof.");
+}
+
+async function clearAdoptedGrade() {
+  state.adoptedGrade = null;
+  const {curve, ...tone} = state.tone;
+  state.tone = tone;
+  renderPanel();
+  await updatePreview();
+  renderPanel();
+  toast("Adopted curve cleared.");
+}
+
+function openArchive() {
+  state.tab = "archive";
+  renderPanel();
+}
+
+function openStrip() {
+  state.tab = "strip";
+  renderPanel();
+}
+
 function restoreAlignment(entry) {
   const peer = need(state.scans.find(item => item.id === entry.peer_id), "The saved repeat scan is not available.");
   state.peerId = peer.id;
@@ -810,6 +901,8 @@ function checkDust() {
 
 const actions = {
   run: perform(runOperation), setCalibration: perform(setCalibration), setTone: perform(setTone), setBase: perform(setBase),
+  addGradePair: perform(addGradePair), removeGradePair, adoptGrade: perform(adoptGrade),
+  clearAdoptedGrade: perform(clearAdoptedGrade), openArchive, openStrip,
   keepReference: perform(() => { state.reference = needBox(); renderOverlay(); renderPanel(); toast("Comparison reference set."); }),
   selectInspect: value => { state.inspectKind = value; renderPanel(); },
   addWedgePatch: perform(form => {

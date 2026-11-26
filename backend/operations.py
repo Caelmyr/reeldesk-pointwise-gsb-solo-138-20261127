@@ -29,6 +29,9 @@ from .strip import (
     CutSettings, assess_cut, mark_boxes, marked_strip_image, perforation_survey, propose_cut_positions,
     suggest_frame_boxes, verify_cut,
 )
+from .strip_grade import (
+    PAPER_BLACK, PAPER_WHITE, MonotoneCurve, audit_proof_image, grade_image, marked_grade_image,
+)
 from .values import (
     Box, DeskError, Point, Segment, VIEW_MODES, boolean, checked_key, image_bytes, integer,
     mapping, number, one_of, radii, rgb_image, sequence,
@@ -76,6 +79,24 @@ class Operations:
             "coverage": self._coverage,
             "masters": self._masters,
             "carrier": self._carrier,
+            "strip-grade": self._strip_grade,
+            "strip_grade": self._strip_grade,
+            "stripgrade": self._strip_grade,
+            "grade": self._strip_grade,
+            "grade-strip": self._strip_grade,
+            "grade-references": self._strip_grade,
+            "unified-grade": self._strip_grade,
+            "roll-grade": self._strip_grade,
+            "frame-grade": self._strip_grade,
+            "batch-grade": self._strip_grade,
+            "positive-grade": self._strip_grade,
+            "strip-curve": self._strip_grade,
+            "reference-grade": self._strip_grade,
+            "reference-pairs": self._strip_grade,
+            "pair-grade": self._strip_grade,
+            "shared-grade": self._strip_grade,
+            "tone-curve": self._strip_grade,
+            "proof-audit": self._proof_audit,
         }
 
     def run(self, scan_id, value):
@@ -362,7 +383,26 @@ class Operations:
         region = self._region(source, value, optional=True)
         options = ProofSettings.read(value.get("proof"))
         calibration = Calibration.read(value.get("calibration"))
-        tone = Tone.read(value.get("tone"))
+        raw_tone = value.get("tone")
+        tone_payload = dict(raw_tone) if isinstance(raw_tone, dict) else ({} if raw_tone is None else raw_tone)
+        adopted_grade = value.get("grade")
+        if adopted_grade is None and value.get("grade_check") is not None:
+            adopted_grade = value.get("grade_check")
+        pair_specs = None
+        full_reports = None
+        grade_curve = None
+        if isinstance(adopted_grade, dict):
+            pair_specs = adopted_grade.get("pairs") or adopted_grade.get("items")
+            grade_curve = adopted_grade.get("curve")
+            if pair_specs and all(isinstance(p, dict) and "kept" in p for p in pair_specs):
+                full_reports = pair_specs
+        if pair_specs is None and value.get("pairs"):
+            pair_specs = value.get("pairs")
+        # Adoption means the proof picture must use the fitted shared curve even
+        # when a caller sends the curve only through the grade envelope.
+        if grade_curve and isinstance(tone_payload, dict) and not tone_payload.get("curve"):
+            tone_payload["curve"] = grade_curve
+        tone = Tone.read(tone_payload)
         view = one_of(value.get("view", "positive"), VIEW_MODES, "view")
         source_copy = self.workspace.preview_image(source, calibration, tone, view, options.max_side, region)
         distribution = None
@@ -370,13 +410,52 @@ class Operations:
             distribution = histogram(self.workspace.calibrated(source, calibration), region)
         roll = self.catalog.get_roll(source.metadata["roll_id"])
         marks = self.catalog.list_marks(source.id)
+
+        # Adopted strip grade: re-check pairs on the actual downscaled proof
+        # photo, before scan_proof paints any annotation markers.
+        grade_audit = None
+        if pair_specs:
+            if full_reports is None and grade_curve is not None:
+                try:
+                    from .strip_grade import evaluate_pair
+                    measurable = Calibration(calibration.flat_id, calibration.dark_id, calibration.base, False)
+                    corrected = self.workspace.calibrated(source, measurable)
+                    curve = MonotoneCurve.from_dict(grade_curve)
+                    domain = grade_curve.get("domain", "density") if isinstance(grade_curve, dict) else "density"
+                    full_reports = [
+                        evaluate_pair(corrected.values, spec, curve, domain=domain,
+                                      medium=source.metadata.get("medium", "negative"),
+                                      valid=corrected.valid.all(axis=2))
+                        for spec in pair_specs
+                    ]
+                except DeskError:
+                    full_reports = None
+            grade_audit = audit_proof_image(
+                source_copy, pair_specs,
+                region=region if region is not None else None,
+                source_size=source.size if region is None else None,
+                full_reports=full_reports,
+                max_side=options.max_side,
+            )
+
         proof, report = scan_proof(
-            source_copy, source.metadata, roll, region, view, options, marks=marks, histogram=distribution
+            source_copy, source.metadata, roll, region or source.bounds, view, options,
+            marks=marks, histogram=distribution, grade_audit=grade_audit,
         )
+        if grade_audit is not None:
+            report["grade_audit"] = grade_audit
+            report["grade_lost"] = grade_audit["lost"]
+            report["grade_lost_labels"] = grade_audit["lost_labels"]
         settings = {
-            "region": region.as_dict(), "proof": options.as_dict(), "tone": tone.as_dict(),
+            "region": (region or source.bounds).as_dict(), "proof": options.as_dict(),
+            "tone": tone.as_dict(),
             "view": view, "calibration": calibration.as_dict(),
         }
+        if adopted_grade is not None:
+            settings["grade"] = {
+                "curve": adopted_grade.get("curve") if isinstance(adopted_grade, dict) else None,
+                "pair_ids": [p.get("id") for p in adopted_grade.get("pairs", []) if isinstance(p, dict)],
+            }
         if options.annotate:
             settings["marks"] = marks
         return Report(
@@ -503,3 +582,197 @@ class Operations:
             "carrier", {"carrier": settings.as_dict(), "region": region.as_dict(), "dpi": dpi},
             result, images=(attachment(preview, "carrier-rails"),),
         )
+
+    # ------------------------------------------------------------------
+    # Shared strip grade across several frames / reference pairs
+    # ------------------------------------------------------------------
+
+    def _grade_calibrated(self, source, value):
+        """Calibration pass that keeps clipped endpoint patches measurable."""
+        calibration = Calibration.read(value.get("calibration"))
+        measurable = Calibration(
+            calibration.flat_id, calibration.dark_id, calibration.base, False
+        )
+        corrected = self.workspace.calibrated(source, measurable)
+        return calibration, measurable, corrected
+
+    def _mark_index(self, scan_id):
+        marks = self.catalog.list_marks(scan_id)
+        return marks, {mark["id"]: mark for mark in marks}
+
+    def _resolve_box_ref(self, reference, field_name, size, mark_index):
+        if isinstance(reference, str):
+            identifier = reference
+            if identifier in mark_index:
+                geometry = mark_index[identifier]["geometry"]
+            else:
+                mark = self.catalog.get_mark(checked_key(identifier, field_name))
+                geometry = mark["geometry"]
+            return Box.read(geometry, field_name, bounds=size)
+        if isinstance(reference, dict):
+            identifier = reference.get("mark_id") or reference.get("id")
+            if identifier and not ({"x", "y", "w", "h"} <= set(reference)):
+                if identifier in mark_index:
+                    geometry = mark_index[identifier]["geometry"]
+                else:
+                    mark = self.catalog.get_mark(checked_key(identifier, field_name))
+                    geometry = mark["geometry"]
+                return Box.read(geometry, field_name, bounds=size)
+        return Box.read(reference, field_name, bounds=size)
+
+    def _grade_pair_specs(self, value, source, mark_index):
+        raw_pairs = value.get("pairs")
+        if raw_pairs is None:
+            raw_pairs = value.get("reference_pairs", value.get("references", value.get("pair_list")))
+        if isinstance(raw_pairs, dict):
+            raw_pairs = raw_pairs.get("pairs", raw_pairs.get("items", []))
+        raw_pairs = sequence(raw_pairs if raw_pairs is not None else [], "pairs", maximum=64)
+        specs = []
+        for index, raw in enumerate(raw_pairs):
+            item = mapping(raw, f"pairs[{index}]")
+            dark_ref = raw_get(item, ("dark", "dark_box", "a", "box_a", "shadow", "dark_id"))
+            bright_ref = raw_get(item, ("bright", "bright_box", "light", "light_box", "b", "box_b",
+                                        "highlight", "bright_id", "light_id"))
+            if dark_ref is None or bright_ref is None:
+                raise DeskError("Give each pair dark and bright reference boxes.", field="pairs")
+            dark = self._resolve_box_ref(dark_ref, f"pairs[{index}].dark", source.size, mark_index)
+            bright = self._resolve_box_ref(bright_ref, f"pairs[{index}].bright", source.size, mark_index)
+            gap = raw_get(item, ("minimum", "min_delta", "required", "gap", "min_gap",
+                                 "gray_difference", "difference"))
+            spec = {
+                "id": str(item.get("id") or item.get("pair_id") or f"pair-{index + 1}"),
+                "label": str(item.get("label") or item.get("name") or f"Reference pair {index + 1}")[:80],
+                "dark": dark.as_dict(),
+                "bright": bright.as_dict(),
+                "minimum": gap if gap is not None else value.get("minimum", value.get("default_gap", .12)),
+            }
+            for key in ("scan_id", "frame", "frame_label"):
+                if item.get(key) is not None:
+                    spec[key] = item[key]
+            specs.append(spec)
+        return specs
+
+    def _grade_keep_boxes(self, value, source, mark_index, marks):
+        keep_refs = []
+        explicit = value.get("keep", value.get("protected"))
+        if explicit not in (None, False):
+            if isinstance(explicit, (list, tuple)):
+                keep_refs.extend(explicit)
+            else:
+                keep_refs.append(explicit)
+        elif value.get("keep_id") or value.get("protected_mark_id"):
+            keep_refs.append(value.get("keep_id") or value.get("protected_mark_id"))
+        use_saved = value.get("use_saved_keep", value.get("keep_marks", explicit is None))
+        if use_saved is not False and not keep_refs:
+            for mark in marks:
+                if mark["kind"] == "keep":
+                    keep_refs.append(mark["id"])
+        boxes = []
+        for index, reference in enumerate(keep_refs[:8]):
+            try:
+                boxes.append(self._resolve_box_ref(reference, f"keep[{index}]", source.size, mark_index))
+            except DeskError:
+                if explicit is not None and explicit is not False:
+                    raise
+        return boxes
+
+    def _paper_settings(self, value):
+        raw_paper = value.get("paper")
+        if raw_paper is None:
+            black = value.get("paper_black", value.get("paper_dark", value.get("black", PAPER_BLACK)))
+            white = value.get("paper_white", value.get("paper_light", value.get("white", PAPER_WHITE)))
+            paper = {"black": black, "white": white}
+        else:
+            paper = raw_paper
+        from .strip_grade import read_paper
+        return read_paper(paper)
+
+    def _strip_grade(self, source, value):
+        calibration, measurable, corrected = self._grade_calibrated(source, value)
+        marks, mark_index = self._mark_index(source.id)
+        specs = self._grade_pair_specs(value, source, mark_index)
+        keep_boxes = self._grade_keep_boxes(value, source, mark_index, marks)
+        paper_black, paper_white = self._paper_settings(value)
+        domain = one_of(value.get("domain", "density"), {"density", "value", "level"}, "domain")
+        if domain == "level":
+            domain = "value"
+        medium = source.metadata.get("medium", "negative")
+        proof_size = value.get("proof_max_side", value.get("output_size", value.get("max_side")))
+        if isinstance(value.get("proof"), dict):
+            proof_size = proof_size or value["proof"].get("max_side")
+        proof_size = integer(proof_size, "proof_max_side", lower=24, upper=4000) if proof_size else None
+        region = self._region(source, value, optional=True)
+
+        result = grade_image(
+            corrected.values, specs,
+            paper_black=paper_black, paper_white=paper_white,
+            keep_boxes=[box.as_dict() for box in keep_boxes],
+            domain=domain, medium=medium,
+            valid=corrected.valid.all(axis=2),
+            bounds=source.size, proof_max_side=proof_size, region=region.as_dict() if region else None,
+        )
+
+        preview_size = proof_size or integer(value.get("preview_side", 1400), "preview_side",
+                                             lower=200, upper=3000)
+        marked = marked_grade_image(
+            corrected.values, result, proof_max_side=preview_size,
+            region=region.as_dict() if region else None,
+        )
+        images = (attachment(marked, "shared-strip-grade"),)
+
+        settings = {
+            "calibration": calibration.as_dict(),
+            "paper": {"black": paper_black, "white": paper_white},
+            "domain": domain,
+            "medium": medium,
+            "pairs": specs,
+            "keep": [box.as_dict() for box in keep_boxes],
+            "curve": result["curve"],
+            "proof_max_side": proof_size,
+            "region": region.as_dict() if region else None,
+        }
+        return Report(
+            "strip-grade", settings, result,
+            images=images, marks_version=self.catalog.marks_version(marks),
+        )
+
+    def _proof_audit(self, source, value):
+        """Standalone downscale re-check for an adopted grade."""
+        grade = mapping(value.get("grade", value), "grade")
+        pair_source = grade.get("pairs", value.get("pairs"))
+        if pair_source is None:
+            raise DeskError("Send the adopted grade with its reference pairs.", field="grade")
+        proof_options = ProofSettings.read(value.get("proof"))
+        calibration = Calibration.read(value.get("calibration"))
+        tone_payload = dict(value.get("tone") or {})
+        if grade.get("curve") and not tone_payload.get("curve"):
+            tone_payload["curve"] = grade["curve"]
+        tone = Tone.read(tone_payload)
+        region = self._region(source, value, optional=True)
+        proof_image = self.workspace.preview_image(
+            source, calibration, tone, "positive", proof_options.max_side, region
+        )
+        full_reports = grade.get("pairs") if isinstance(grade.get("pairs"), list) else None
+        audit = audit_proof_image(
+            proof_image, pair_source,
+            region=region if region else None,
+            source_size=source.size if region is None else None,
+            full_reports=full_reports,
+        )
+        marked = proof_image.copy()
+        from .strip_grade import draw_proof_warnings
+        draw_proof_warnings(marked, audit, left=0, top=0)
+        report = {"grade_audit": audit, "proof": proof_options.as_dict()}
+        return Report(
+            "proof-audit",
+            {"proof": proof_options.as_dict(), "tone": tone.as_dict(),
+             "region": region.as_dict() if region else None},
+            report, images=(attachment(marked, "proof-size-pair-audit"),),
+        )
+
+
+def raw_get(mapping_like, keys):
+    for key in keys:
+        if isinstance(mapping_like, dict) and mapping_like.get(key) is not None:
+            return mapping_like[key]
+    return None
