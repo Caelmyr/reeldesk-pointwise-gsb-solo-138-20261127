@@ -1,4 +1,4 @@
-import {asPercent, button, describeDate, h, link, metrics, prettyNumber as p, table} from "./ui.js";
+import {asPercent, button, describeDate, h, link, message, metrics, prettyNumber as p, table} from "./ui.js";
 
 const channels = ["R", "G", "B"];
 
@@ -8,7 +8,12 @@ const presentation = {
     ["Input depth", `${x.bit_depth} bit`]],
   profile: x => [["Usable stations", `${x.usable_stations} / ${x.samples}`], ["Profile length", p(x.distance_px.at(-1), 2, " px")]],
   balance: x => [["Result", x.status], ...channels.map(key => [`${key} density difference`, p(x.delta[key], 4, " D")])],
-  calibration: x => [["Backlight flat", x.flat_name], ["P05–P95 drift", p(x.p05_p95_drift, 4, " D")], ["Tiles", x.tiles.length]],
+  calibration: x => [["Backlight flat", x.flat_name], ["P05–P95 drift", p(x.p05_p95_drift, 4, " D")], ["Tiles", x.tiles.length],
+    ...(x.witness_plan ? [["Witness cells", x.witness_plan.held_cells], ["Max witness correction", p(x.witness_plan.max_correction, 4, " D")]] : [])],
+  "witness-calibration": x => [
+    ["Status", x.status], ["Calibrated cells", x.calibrated_cells], ["Blank cells", x.blank_cells],
+    ["Max correction", p(x.max_correction, 4, " D")], ["Discarded witnesses", x.discarded_witness_count],
+  ],
   registration: x => [["Overlap coverage", asPercent(x.coverage)], ["Model", x.model],
     [x.score === undefined ? "Fit error" : "Patch score", p(x.score ?? x.rms_px, 4, x.rms_px === undefined ? "" : " px")],
     ["Translation", `${p(x.transform[2], 2)}, ${p(x.transform[5], 2)} px`]],
@@ -79,6 +84,39 @@ function graph(data, colors, seriesNames, width = 560, height = 160) {
   return canvas;
 }
 
+function witnessReportNodes(plan, actions, interactive) {
+  if (!plan?.cells) return null;
+  const calibrated = plan.cells.filter(cell => cell.calibrated);
+  const discarded = plan.discarded_witnesses ?? [];
+  return [
+    interactive ? button("Adopt compensation for Compare regions", () => actions.adoptCompensation(plan), "primary",
+      {disabled: !plan.adoptable}) : null,
+    table(["Cell", "Block", "State", "R ΔD", "G ΔD", "B ΔD", "Max", "Witnesses"],
+      calibrated.map(cell => [
+        cell.id,
+        cell.component ?? "—",
+        cell.status,
+        ...(cell.correction ?? [null, null, null]).map(value => p(value, 4)),
+        p(cell.max_abs_correction, 4, " D"),
+        (cell.witnesses ?? []).join(", ") || "fixed",
+      ])),
+    plan.components?.length ? table(["Block", "Reference-connected", "Cells", "Max correction"],
+      plan.components.map(component => [
+        component.id,
+        component.anchored ? "yes" : "separate",
+        component.cells.map(cell => `r${cell.row}c${cell.column}`).join(", "),
+        p(component.max_correction, 4, " D"),
+      ])) : null,
+    discarded.length ? table(["Discarded witness", "Name", "Cells", "Reason"],
+      discarded.map(witness => [
+        witness.id,
+        witness.label ?? witness.name,
+        (witness.cells ?? []).map(cell => `r${cell.row}c${cell.column}`).join(", "),
+        witness.reason ?? "incompatible with limits",
+      ])) : message("No witnesses needed to be discarded."),
+  ];
+}
+
 function extendedTable(kind, data, state, actions, interactive) {
   if (kind === "density") return [
     table(["Channel", "Median D", "P05–P95", "Eligible", "Clipped low / high"],
@@ -101,8 +139,28 @@ function extendedTable(kind, data, state, actions, interactive) {
         return [channel, p(value.source), p(value.peer), p(value.median_delta), value.joint];
       }));
   }
-  if (kind === "calibration") return table(["Row", "Column", "Drift D", "Light change"], data.tiles.map(tile =>
-    [tile.row + 1, tile.column + 1, p(tile.density_drift), p(tile.flat_relative_percent, 2, "%")]));
+  if (kind === "balance") {
+    if (!data.common_regions && !data.separate) return null;
+    return table(["Channel", "ΔD", "Common calibration region", "Left share", "Reference share", "Separate dominant parts"],
+      channels.map(channel => {
+        const common = data.common_regions?.[channel];
+        const split = data.separate?.[channel];
+        return [
+          channel,
+          p(data.delta?.[channel], 4, " D"),
+          common?.calibration_region ?? "none",
+          common ? asPercent(common.region_measured_fraction) : "—",
+          common ? asPercent(common.reference_measured_fraction) : "—",
+          split ? `${split.left_dominant_region ?? "no data"} vs ${split.reference_dominant_region ?? "no data"}` : "—",
+        ];
+      }));
+  }
+  if (kind === "witness-calibration" || kind === "witness") return witnessReportNodes(data, actions, interactive);
+  if (kind === "calibration") return [
+    table(["Row", "Column", "Drift D", "Light change"], data.tiles.map(tile =>
+      [tile.row + 1, tile.column + 1, p(tile.density_drift), p(tile.flat_relative_percent, 2, "%")])),
+    data.witness_plan ? witnessReportNodes(data.witness_plan, actions, interactive) : null,
+  ];
   if (kind === "dust") return [
     table(["Finding", "Type", "Pixels", "Severity D", "Opt in"], data.findings.map(item => [
       interactive ? button(`#${item.number}`, () => actions.pickFinding(item), "text-button") : item.number,
@@ -167,7 +225,7 @@ export function resultNodes(entry, state, actions, saved) {
     h("div", {class: "stack"},
       info.map(file => link(file.name, `${file.url}?download=1`, {download: true})),
       saved ? link("ZIP with originals", `/api/records/${entry.id}/packet?originals=1`, {download: true}) : null,
-      saved && ["profile", "calibration", "density", "dust", "residual", "compare", "cut", "cut-verified", "grain",
+      saved && ["profile", "calibration", "witness-calibration", "witness", "density", "dust", "residual", "compare", "cut", "cut-verified", "grain",
         "coverage", "wedge", "carrier"].includes(entry.kind)
         ? link("Reading CSV", `/api/records/${entry.id}/csv`, {download: true}) : null,
       saved && entry.kind === "registration" && entry.scan_id === state.scan.id

@@ -31,8 +31,9 @@ from .strip import (
 )
 from .values import (
     Box, DeskError, Point, Segment, VIEW_MODES, boolean, checked_key, image_bytes, integer,
-    mapping, number, one_of, radii, rgb_image, sequence,
+    mapping, number, one_of, radii, rgb_image, sequence, text_list,
 )
+from .witnesses import grid_regions, observations_from_marks, parse_cell, witness_plan
 
 
 @dataclass(frozen=True)
@@ -57,6 +58,13 @@ class Operations:
             "profile": self._profile,
             "balance": self._balance,
             "calibration": self._calibration,
+            "witness-calibration": self._witness_calibration,
+            "witness": self._witness_calibration,
+            "witness-compensation": self._witness_calibration,
+            "reference-compensation": self._witness_calibration,
+            "reference-calibration": self._witness_calibration,
+            "illumination-witness": self._witness_calibration,
+            "witness-map": self._witness_calibration,
             "registration": self._registration,
             "compare": self._compare,
             "residual": self._residual,
@@ -150,12 +158,64 @@ class Operations:
         region = self._region(source, value)
         reference = self._region(source, value, "reference")
         calibration, corrected = self._reading(source, value)
-        report = compare_regions(corrected, region, reference)
-        return Report(
-            "balance",
-            {"region": region.as_dict(), "reference": reference.as_dict(), "calibration": calibration.as_dict()},
-            report,
+        compensation = None
+        for key in (
+            "compensation", "witness_plan", "adopted_compensation", "compensation_plan",
+            "witness_result", "plan", "witness_corrections", "calibration_regions",
+        ):
+            if value.get(key) is not None:
+                compensation = value[key]
+                break
+        if isinstance(compensation, dict) and isinstance(compensation.get("result"), dict):
+            compensation = compensation["result"].get("witness_plan", compensation["result"])
+        if isinstance(compensation, dict) and "witness_plan" in compensation and "cells" not in compensation:
+            compensation = compensation["witness_plan"]
+        if compensation is None:
+            job_identifier = value.get(
+                "compensation_job_id",
+                value.get("witness_job_id", value.get("adopted_job_id")),
+            )
+            if job_identifier:
+                job = self.jobs.get(checked_key(job_identifier, "compensation_job_id"))
+                job_result = job.report.result
+                compensation = job_result.get("witness_plan", job_result)
+        marks_version = None
+        auto_witness_plan = False
+        auto_witness_requested = bool(value.get("use_witnesses") or value.get("witness_compensation"))
+        if compensation is None and (auto_witness_requested or any(value.get(key) is not None for key in (
+            "reference_cell", "anchor_cell", "fixed_cell",
+            "same_name_limit", "jump_limit", "witnesses", "observations",
+        ))):
+            witness_region = self._region(source, value, "witness_region", optional=True)
+            if value.get("grid_region") is not None:
+                witness_region = self._region(source, value, "grid_region")
+            tiles = (
+                integer(value.get("rows", 4), "rows", lower=2, upper=12),
+                integer(value.get("columns", 8), "columns", lower=2, upper=18),
+            )
+            compensation, _, marks_version = self._build_witness_plan(
+                source, value, corrected, witness_region, tiles
+            )
+            auto_witness_plan = True
+        zone_level = value.get(
+            "zone_level",
+            value.get("calibration_level", value.get("region_level", value.get("provenance_level"))),
         )
+        report = compare_regions(
+            corrected, region, reference, compensation,
+            zone_level=zone_level,
+            calibration_level=value.get("calibration_level"),
+            region_level=value.get("region_level"),
+        )
+        settings = {
+            "region": region.as_dict(), "reference": reference.as_dict(), "calibration": calibration.as_dict(),
+        }
+        if isinstance(compensation, dict):
+            settings["compensation"] = compensation
+            settings["zone_level"] = zone_level or compensation.get("compare_zone_level") or compensation.get("zone_level") or "cell"
+        if auto_witness_plan:
+            report["witness_plan"] = compensation
+        return Report("balance", settings, report, marks_version=marks_version)
 
     def _calibration(self, source, value):
         calibration = Calibration.read(value.get("calibration"))
@@ -163,25 +223,197 @@ class Operations:
         if source.metadata["role"] == "flat":
             flat = source
             calibration = Calibration(source.id, calibration.dark_id, calibration.base, calibration.reject_clipped)
-        if flat is None:
+        witness_requested = bool(
+            value.get("witness_compensation") is not None
+            or value.get("witness_plan") is not None
+            or value.get("reference_cell") is not None
+            or value.get("anchor_cell") is not None
+            or value.get("fixed_cell") is not None
+            or value.get("witnesses") is not None
+            or value.get("reference_witnesses") is not None
+            or value.get("reference_marks") is not None
+            or value.get("references") is not None
+            or value.get("observations") is not None
+            or value.get("compensate")
+            or value.get("recommend")
+        )
+        if flat is None and not witness_requested:
             raise DeskError("Select a backlight flat to measure its illumination.", field="calibration.flat_id")
         region = self._region(source, value, optional=True)
         tiles = (
             integer(value.get("rows", 4), "rows", lower=2, upper=12),
             integer(value.get("columns", 8), "columns", lower=2, upper=18),
         )
-        smooth = number(value.get("smooth", 1.6), "smooth", lower=0, upper=15)
-        result = calibration_map(flat.image, dark.image if dark else None, region, tiles, smooth, dpi=source.metadata["dpi"])
-        result["flat_name"] = flat.metadata["name"]
-        result["dark_name"] = dark.metadata["name"] if dark else None
-        return Report(
-            "calibration",
-            {
-                "region": region.as_dict(), "rows": tiles[0], "columns": tiles[1], "smooth": smooth,
-                "calibration": calibration.as_dict(),
-            },
-            result,
+        settings = {
+            "region": region.as_dict(), "rows": tiles[0], "columns": tiles[1],
+            "calibration": calibration.as_dict(),
+        }
+        if flat is not None:
+            smooth = number(value.get("smooth", 1.6), "smooth", lower=0, upper=15)
+            result = calibration_map(flat.image, dark.image if dark else None, region, tiles, smooth, dpi=source.metadata["dpi"])
+            result["flat_name"] = flat.metadata["name"]
+            result["dark_name"] = dark.metadata["name"] if dark else None
+            settings["smooth"] = smooth
+        else:
+            result = {"region": region.as_dict(), "rows": tiles[0], "columns": tiles[1], "tiles": []}
+
+        marks_version = None
+        if witness_requested:
+            _, corrected = self._reading(source, value)
+            plan, witness_settings, marks_version = self._build_witness_plan(
+                source, value, corrected, region, tiles
+            )
+            result["witness_plan"] = plan
+            if flat is None:
+                result.update({key: value for key, value in plan.items() if key not in {"region"}})
+                result["witness_plan"] = plan
+                result["flat_name"] = None
+                result["dark_name"] = None
+            settings["witnesses"] = witness_settings
+        return Report("calibration", settings, result, marks_version=marks_version)
+
+    def _witness_reference_cell(self, value, region, rows, columns):
+        raw = value.get(
+            "reference_cell",
+            value.get("anchor_cell", value.get("fixed_cell", value.get("anchor", value.get("fixed")))),
         )
+        if isinstance(raw, bool):
+            raw = None
+        if raw is None and value.get("reference") is not None:
+            reference = Box.read(value.get("reference"), "reference", bounds=(region.x + region.w, region.y + region.h))
+            center_x = reference.x + reference.w / 2
+            center_y = reference.y + reference.h / 2
+            column = min(columns - 1, max(0, int((center_x - region.x) * columns / region.w)))
+            row = min(rows - 1, max(0, int((center_y - region.y) * rows / region.h)))
+            return row, column
+        if raw is None and value.get("reference_row") is not None and value.get("reference_column") is not None:
+            raw = {
+                "row": value.get("reference_row"),
+                "column": value.get("reference_column"),
+                "one_based": value.get("reference_one_based", True),
+            }
+        if raw is None:
+            anchor_witness = value.get("anchor_witness", value.get("fixed_witness"))
+            if anchor_witness is not None and value.get("witnesses"):
+                for item in value["witnesses"]:
+                    if str(item.get("id", item.get("witness_id", item.get("mark_id")))) == str(anchor_witness):
+                        raw = item.get("cell", {"row": item.get("row"), "column": item.get("column")})
+                        break
+        if raw is None:
+            return None
+        return parse_cell(raw, rows, columns)
+
+    def _witness_limits(self, value):
+        nested = value.get("limits")
+        nested = mapping(nested, "limits") if isinstance(nested, dict) else {}
+        witness_options = value.get("witness_compensation")
+        witness_options = mapping(witness_options, "witness_compensation") if isinstance(witness_options, dict) else {}
+
+        def pick(*keys, default=None):
+            containers = (value, witness_options, nested)
+            for container in containers:
+                for key in keys:
+                    if isinstance(container, dict) and container.get(key) is not None:
+                        return container[key]
+            return default
+
+        common = pick("limit", "density_limit", default=None)
+        same = pick(
+            "same_name_limit", "equal_limit", "same_name_difference_limit", "same_name_difference",
+            "name_limit", "match_limit", "same_name_tolerance", "equal_density_limit",
+            "match_tolerance", "same_name", default=common if common is not None else .04,
+        )
+        jump = pick(
+            "jump_limit", "adjacent_limit", "neighbor_limit", "adjacent_jump_limit",
+            "adjacent_jump", "compensation_jump_limit", "jump_tolerance",
+            "neighbor_jump_limit", "neighbor_jump", "continuity_limit", "continuity_tolerance",
+            "smoothness_limit", "jump", "adjacent",
+            default=common if common is not None else .03,
+        )
+        return same, jump
+
+    def _build_witness_plan(self, source, value, corrected, region, tiles):
+        rows, columns = tiles
+        grid = grid_regions(region, rows, columns)
+        explicit_observations = value.get("observations")
+        if explicit_observations is None:
+            explicit_observations = value.get("witness_samples")
+        raw_witnesses = value.get("witnesses")
+        if raw_witnesses is None:
+            for key in ("reference_witnesses", "reference_marks", "references", "reference_blocks", "blocks", "patches"):
+                if value.get(key) is not None:
+                    raw_witnesses = value[key]
+                    break
+        if explicit_observations is None and isinstance(raw_witnesses, list) and raw_witnesses:
+            first_witness = mapping(raw_witnesses[0], "witnesses[0]")
+            compact = any(key in first_witness for key in ("median", "density", "medians", "density_median"))
+            located = any(key in first_witness for key in ("cell", "row", "r"))
+            if compact and located:
+                explicit_observations = raw_witnesses
+        witness_details = None
+        marks_version = None
+        if explicit_observations is not None:
+            observations = sequence(explicit_observations, "observations", maximum=5000)
+        else:
+            explicit_marks = raw_witnesses
+            if explicit_marks is not None:
+                marks = sequence(explicit_marks, "witnesses", maximum=500)
+            else:
+                marks = self.catalog.list_marks(source.id)
+                marks_version = self.catalog.marks_version(marks)
+            labels = value.get("witness_labels")
+            if labels is not None:
+                allowed = set(text_list(labels, "witness_labels"))
+                marks = [mark for mark in marks if mark.get("label") in allowed]
+            # Same-name groups are the useful equality witnesses.  Keep single
+            # references only when the caller explicitly asks for them.
+            include_single = boolean(value.get("include_single", False), "include_single") if "include_single" in value else False
+            if not include_single:
+                counts = {}
+                for mark in marks:
+                    if mark.get("kind", "reference") == "reference" and mark.get("label"):
+                        counts[mark["label"]] = counts.get(mark["label"], 0) + 1
+                marks = [
+                    mark for mark in marks
+                    if mark.get("label") and counts.get(mark["label"], 0) >= 2
+                ]
+            observations, witness_details = observations_from_marks(corrected, grid, marks)
+            # Explicit compact cell witnesses may be supplied alongside marks.
+            compact = value.get("cell_witnesses")
+            if compact:
+                observations = [*observations, *sequence(compact, "cell_witnesses", maximum=5000)]
+
+        reference_cell = self._witness_reference_cell(value, region, rows, columns)
+        same_limit, jump_limit = self._witness_limits(value)
+        plan = witness_plan(
+            rows=rows,
+            columns=columns,
+            observations=observations,
+            region=region,
+            reference_cell=reference_cell,
+            same_name_limit=same_limit,
+            jump_limit=jump_limit,
+            witness_details=witness_details,
+        )
+        settings = {
+            "region": region.as_dict(), "rows": rows, "columns": columns,
+            "reference_cell": (
+                {"row": reference_cell[0], "column": reference_cell[1]} if reference_cell else None
+            ),
+            "same_name_limit": same_limit, "jump_limit": jump_limit,
+        }
+        return plan, settings, marks_version
+
+    def _witness_calibration(self, source, value):
+        calibration, corrected = self._reading(source, value)
+        region = self._region(source, value, optional=True)
+        tiles = (
+            integer(value.get("rows", 4), "rows", lower=2, upper=12),
+            integer(value.get("columns", 8), "columns", lower=2, upper=18),
+        )
+        plan, witness_settings, marks_version = self._build_witness_plan(source, value, corrected, region, tiles)
+        settings = {"calibration": calibration.as_dict(), **witness_settings}
+        return Report("witness-calibration", settings, plan, marks_version=marks_version)
 
     def _registration(self, source, value):
         peer, primary, repeat, settings = self._pair_settings(source, value)

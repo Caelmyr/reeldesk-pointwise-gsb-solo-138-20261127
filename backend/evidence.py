@@ -34,6 +34,13 @@ KIND_TITLES = {
     "profile": "Density profile",
     "balance": "Local contrast",
     "calibration": "Illumination check",
+    "witness-calibration": "Witness illumination compensation",
+    "witness": "Witness illumination compensation",
+    "witness-compensation": "Witness illumination compensation",
+    "reference-compensation": "Reference illumination compensation",
+    "reference-calibration": "Reference illumination compensation",
+    "illumination-witness": "Illumination witness compensation",
+    "witness-map": "Illumination witness map",
     "registration": "Repeat-pass alignment",
     "compare": "Repeat-pass point check",
     "residual": "Repeat-pass difference",
@@ -100,7 +107,29 @@ def result_rows(kind, result):
         )
     if kind == "calibration":
         keys = ["row", "column", "samples", "flat_relative_percent", "density_drift"]
-        return keys, [[cell[key] for key in keys] for cell in result["tiles"]]
+        rows = []
+        for cell in result["tiles"]:
+            row = []
+            for key in keys:
+                value = cell.get(key)
+                if key == "samples" and isinstance(value, dict):
+                    value = sum(value.values())
+                row.append(value)
+            rows.append(row)
+        return keys, rows
+    if kind in {
+        "witness-calibration", "witness", "witness-compensation", "reference-compensation",
+        "reference-calibration", "illumination-witness", "witness-map",
+    }:
+        keys = ["row", "column", "status", "component", "correction_r", "correction_g", "correction_b", "max_abs_correction"]
+        rows = []
+        for cell in result.get("cells", result.get("tiles", [])):
+            correction = cell.get("correction") or [None, None, None]
+            rows.append([
+                cell.get("row"), cell.get("column"), cell.get("status"), cell.get("component"),
+                *correction, cell.get("max_abs_correction"),
+            ])
+        return keys, rows
     if kind == "dust":
         keys = [
             "number", "pixels", "polarity", "severity", "roundness",

@@ -5,7 +5,7 @@ import {resultNodes, showPacket} from "./results.js";
 const state = {
   rolls: [], roll: null, scans: [], scan: null, marks: [], records: [], operationTitles: {},
   mode: "positive", tool: "box", tab: "inspect", inspectKind: "coverage",
-  box: null, line: null, point: null, reference: null, drag: null, activeMark: null,
+  box: null, line: null, point: null, reference: null, compensation: null, drag: null, activeMark: null,
   peerId: "", alignment: null, alignMethod: "patch", landmarks: [],
   wedge: [], cutPlan: null, cutOptions: {kerf_mm: .16, reserve_mm: .7, retained: "both"},
   lastDust: null, restore: new Set(), pickedDust: null,
@@ -207,6 +207,15 @@ function renderOverlay() {
     const attrs = {class: `saved-box is-${mark.kind}`};
     overlay.append(mark.kind === "cut" ? svgLine(mark.geometry, attrs) : rect(mark.geometry, attrs));
   }
+  if (state.compensation?.cells) {
+    for (const cell of state.compensation.cells) {
+      if (!cell.calibrated || !cell.region) continue;
+      overlay.append(rect(cell.region, {
+        class: `compensation-cell comp-${cell.status} block-${String(cell.component || "none").toLowerCase()}`,
+        "data-cell": cell.id,
+      }));
+    }
+  }
   if (state.reference) overlay.append(rect(state.reference, {id: "comparison-reference"}));
   if (state.box) overlay.append(rect(state.box, {class: "live-drawing"}));
   if (state.line) overlay.append(svgLine(state.line, {class: "live-drawing"}));
@@ -341,6 +350,7 @@ async function selectScan(scan, {persist = true} = {}) {
   state.calibration = calibrationFor(scan);
   state.peerCalibration = calibrationFor(state.scans.find(item => item.id === state.peerId));
   state.lastDust = null;
+  state.compensation = null;
   state.restore.clear();
   state.pickedDust = null;
   state.mode = scan?.role === "scan" ? "positive" : "raw";
@@ -411,8 +421,26 @@ function operationArgs(kind, element, overrides) {
     case "density": return {...base, region: needBox()};
     case "point": return {...base, point: needPoint()};
     case "profile": return {...base, line: needLine()};
-    case "balance": return {...base, region: needBox(), reference: need(state.reference, "Keep a reference region first.")};
-    case "calibration": return {...base, region, rows: +fields.rows, columns: +fields.columns};
+    case "balance": return {
+      ...base, region: needBox(), reference: need(state.reference, "Keep a reference region first."),
+      compensation: state.compensation ?? undefined,
+      zone_level: state.compensation?.compare_zone_level ?? "cell",
+    };
+    case "calibration": {
+      const payload = {...base, region, rows: +fields.rows, columns: +fields.columns};
+      if (fields.witness_enabled === "on") {
+        Object.assign(payload, {
+          reference_cell: {row: Math.max(0, (+fields.reference_row || 1) - 1), column: Math.max(0, (+fields.reference_column || 1) - 1)},
+          same_name_limit: +fields.same_name_limit,
+          jump_limit: +fields.jump_limit,
+          witness_compensation: true,
+        });
+      }
+      return payload;
+    }
+    case "witness-calibration": return {...base, region, rows: +fields.rows, columns: +fields.columns,
+      reference_cell: {row: Math.max(0, (+fields.reference_row || 1) - 1), column: Math.max(0, (+fields.reference_column || 1) - 1)},
+      same_name_limit: +fields.same_name_limit, jump_limit: +fields.jump_limit};
     case "coverage": return {...base, region, coverage: {channel: fields.channel ?? "rgb"}};
     case "grain": return {...base, region: needBox(), scales: [0, 1, 2].map(i => +fields[`scale${i}`])};
     case "focus": return {...base, region: needBox(), focus: {orientation: fields.orientation ?? "auto"}};
@@ -450,7 +478,10 @@ function operationArgs(kind, element, overrides) {
 
 function showResult(entry, saved = false) {
   const result = $("result-section");
-  result.replaceChildren(...resultNodes(entry, state, actions, saved));
+  const nodes = resultNodes(entry, state, actions, saved)
+    .flat(Number.POSITIVE_INFINITY)
+    .filter(node => node instanceof Node || typeof node === "string");
+  result.replaceChildren(...nodes);
   result.hidden = false;
   result.scrollIntoView({block: "nearest", behavior: "instant"});
 }
@@ -811,6 +842,19 @@ function checkDust() {
 const actions = {
   run: perform(runOperation), setCalibration: perform(setCalibration), setTone: perform(setTone), setBase: perform(setBase),
   keepReference: perform(() => { state.reference = needBox(); renderOverlay(); renderPanel(); toast("Comparison reference set."); }),
+  adoptCompensation: perform(plan => {
+    const adopted = plan?.witness_plan ?? plan;
+    if (!adopted || !Array.isArray(adopted.cells)) throw Error("Run a witness compensation recommendation first.");
+    state.compensation = {
+      ...adopted,
+      adopted_at: new Date().toISOString(),
+      compare_zone_level: adopted.compare_zone_level || "cell",
+    };
+    renderOverlay();
+    renderPanel();
+    toast(`Compensation adopted · max ${Number(adopted.max_correction ?? 0).toFixed(4)} D. Compare regions now uses common calibration cells.`);
+  }),
+  clearCompensation: () => { state.compensation = null; renderOverlay(); renderPanel(); toast("Adopted compensation cleared."); },
   selectInspect: value => { state.inspectKind = value; renderPanel(); },
   addWedgePatch: perform(form => {
     const nominal = +formValues(form).nominal;

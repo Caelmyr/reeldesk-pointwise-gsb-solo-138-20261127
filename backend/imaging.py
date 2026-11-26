@@ -16,6 +16,7 @@ from .values import (
     channel_vector, image_bytes, mapping, number, optional_key, rgb_image,
     round_channels,
 )
+from .witnesses import compensation_maps, provenance_compare
 
 
 FORMATS = frozenset({"JPEG", "PNG", "TIFF", "WEBP"})
@@ -446,25 +447,108 @@ def histogram(calibrated, region, *, bins=48, low=-.2, high=2.8):
     return {"edges": edges.round(5).tolist(), "channels": result, "region": region.as_dict()}
 
 
-def compare_regions(calibrated, region, reference):
-    left = density_stats(calibrated, region)
-    right = density_stats(calibrated, reference)
-    differences = {}
-    missing = []
-    for channel in PRIMARY_CHANNELS:
-        main = left["channels"][channel]
-        ref = right["channels"][channel]
-        if min(main["valid_fraction"], ref["valid_fraction"]) < .5:
-            differences[channel] = None
-            missing.append(channel)
+def compare_regions(calibrated, region, reference, compensation=None, *extra_args, **legacy_options):
+    zone_level = legacy_options.get("zone_level")
+    if isinstance(compensation, str) and zone_level is None:
+        zone_level = compensation
+        compensation = None
+    for extra in extra_args:
+        if isinstance(extra, str) and zone_level is None:
+            zone_level = extra
+        elif isinstance(extra, (int, float)) and not isinstance(extra, bool):
+            legacy_options.setdefault("minimum_fraction", extra)
+    if compensation is None:
+        compensation = (
+            legacy_options.get("witness_plan")
+            or legacy_options.get("plan")
+            or legacy_options.get("adopted_compensation")
+            or legacy_options.get("compensation_plan")
+        )
+    if compensation is None and legacy_options.get("calibration_regions") is not None:
+        compensation = {"calibration_regions": legacy_options["calibration_regions"]}
+    if compensation is None and legacy_options.get("regions") is not None:
+        compensation = {"calibration_regions": legacy_options["regions"]}
+    if compensation is None and legacy_options.get("zones") is not None:
+        compensation = {"zones": legacy_options["zones"]}
+    if compensation is None and legacy_options.get("cells") is not None:
+        compensation = {"cells": legacy_options["cells"]}
+    if compensation is None and legacy_options.get("corrections") is not None:
+        compensation = {"corrections": legacy_options["corrections"]}
+    if isinstance(compensation, list):
+        if compensation and not isinstance(compensation[0], dict):
+            compensation = {"corrections": compensation}
         else:
-            differences[channel] = round(main["median"] - ref["median"], 5)
+            key = "calibration_regions" if compensation and isinstance(compensation[0], dict) and (
+                "mask" in compensation[0] or ("id" in compensation[0] and "region" in compensation[0])
+            ) else "cells"
+            compensation = {key: compensation}
+
+    if isinstance(compensation, dict) and isinstance(compensation.get("witness_plan"), dict):
+        compensation = compensation["witness_plan"]
+    if isinstance(compensation, dict) and isinstance(compensation.get("result"), dict):
+        compensation = compensation["result"].get("witness_plan", compensation["result"])
+
+    use_provenance = isinstance(compensation, dict) and bool(
+        compensation.get("cells")
+        or compensation.get("tiles")
+        or compensation.get("regions")
+        or compensation.get("zones")
+        or compensation.get("calibration_regions")
+        or compensation.get("corrections")
+    )
+    if not use_provenance:
+        left = density_stats(calibrated, region)
+        right = density_stats(calibrated, reference)
+        differences = {}
+        missing = []
+        for channel in PRIMARY_CHANNELS:
+            main = left["channels"][channel]
+            ref = right["channels"][channel]
+            if min(main["valid_fraction"], ref["valid_fraction"]) < .5:
+                differences[channel] = None
+                missing.append(channel)
+            else:
+                differences[channel] = round(main["median"] - ref["median"], 5)
+        return {
+            "region": left,
+            "reference": right,
+            "delta": differences,
+            "missing_channels": missing,
+            "status": "review" if missing else "measured",
+        }
+
+    height, width = calibrated.values.shape[:2]
+    zone_level = (
+        zone_level
+        or legacy_options.get("zone_level")
+        or compensation.get("compare_zone_level")
+        or compensation.get("zone_level")
+    )
+    effective_level = (
+        zone_level
+        or legacy_options.get("calibration_level")
+        or legacy_options.get("region_level")
+        or legacy_options.get("provenance_level")
+    )
+    minimum_fraction = float(legacy_options.get("minimum_fraction", .5))
+    maps = compensation_maps(compensation, height, width, zone_level=effective_level)
+    factor = np.power(10.0, -maps["offset"], dtype=np.float32)
+    compensated = Calibrated(
+        values=calibrated.values * factor,
+        valid=calibrated.valid,
+        low_clip=calibrated.low_clip,
+        high_clip=calibrated.high_clip,
+    )
+    left = density_stats(compensated, region)
+    right = density_stats(compensated, reference)
+    provenance = provenance_compare(
+        calibrated.density, calibrated.valid, region, reference, compensation,
+        zone_level=effective_level, minimum_fraction=minimum_fraction,
+    )
     return {
         "region": left,
         "reference": right,
-        "delta": differences,
-        "missing_channels": missing,
-        "status": "review" if missing else "measured",
+        **provenance,
     }
 
 

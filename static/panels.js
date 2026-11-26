@@ -34,12 +34,14 @@ function standardReading(state, actions) {
   return section("Density reading",
     message("Draw a region or choose a frame. Density is measured in the original scan."),
     props("stack",
+      state.compensation ? message(`Witness compensation adopted · max ${Number(state.compensation.max_correction ?? 0).toFixed(4)} D · common calibration-region rule on.`) : null,
       button("Measure region", () => actions.run("density"), "primary"),
       button("Set base from region", actions.setBase),
       button("Read source point", () => actions.run("point")),
       button("Read line", () => actions.run("profile")),
       button("Keep as reference", actions.keepReference),
-      button("Compare regions", () => actions.run("balance"), "quiet", {disabled: !state.reference})),
+      button("Compare regions", () => actions.run("balance"), "quiet", {disabled: !state.reference}),
+      state.compensation ? button("Clear compensation", actions.clearCompensation, "text-button") : null),
   );
 }
 
@@ -55,7 +57,19 @@ function imagingStudies(state, actions) {
   const kind = state.inspectKind;
   let fields;
   if (kind === "calibration") {
-    fields = props("columns-2", num("rows", "Rows", 4, 2, 12), num("columns", "Columns", 8, 2, 18));
+    fields = [
+      props("columns-2", num("rows", "Rows", 4, 2, 12), num("columns", "Columns", 8, 2, 18)),
+      h("details", {class: "witness-fields"},
+        h("summary", {}, "Reference-cell drift compensation"),
+        checkbox("witness_enabled", "Use same-name Reference marks", false),
+        props("columns-2",
+          num("reference_row", "Fixed row (1-based)", 1, 1, 12),
+          num("reference_column", "Fixed column (1-based)", 1, 1, 18)),
+        props("columns-2",
+          num("same_name_limit", "Same-name limit D", .04, 0, 2, .005),
+          num("jump_limit", "Adjacent jump limit D", .03, 0, 2, .005)),
+        message("Give equal-density film patches identical Reference labels. The recommendation can discard incompatible witnesses and leaves unproved cells blank.")),
+    ];
   } else if (kind === "dust") {
     fields = props("columns-2", num("radius", "Grain radius (px)", 5, 2, 24), num("threshold", "Density difference", .12, .015, 1.2, .001));
   } else if (kind === "grain") {

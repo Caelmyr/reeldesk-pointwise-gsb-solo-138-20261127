@@ -170,3 +170,9 @@ dialog::backdrop { background: #10110fb5; backdrop-filter: blur(2px); }
 .wedge-actions button { margin: 0 7px 8px 0; }
 .roll-title-row h1 { font-size: 24px; }
 .roll-title-row .icon-button { width: 23px; min-width: 23px; padding: 0; flex: 0 0 23px; }
+
+.witness-fields { border-top: 1px solid var(--soft-border); padding-top: 10px; }
+.witness-fields summary { cursor: pointer; color: var(--accent); font-size: 12px; font-weight: 700; margin-bottom: 8px; }
+.compensation-cell { fill: rgba(164, 206, 177, .08); stroke: rgba(164, 206, 177, .72); stroke-width: 1.4; vector-effect: non-scaling-stroke; }
+.compensation-cell.comp-reference { fill: rgba(229, 185, 130, .16); stroke: var(--accent); stroke-width: 2.2; }
+.compensation-cell.comp-separate { fill: rgba(133, 174, 218, .12); stroke: #85aeda; stroke-dasharray: 7 4; }
