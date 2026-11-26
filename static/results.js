@@ -178,6 +178,7 @@ export function resultNodes(entry, state, actions, saved) {
 }
 
 export function showPacket(data) {
+  if (data.format === "batch") return showBatchPacket(data);
   return [
     h("header", {class: "result-heading"},
       h("div", {}, h("p", {class: "eyebrow"}, "PACKET CHECK"),
@@ -186,5 +187,70 @@ export function showPacket(data) {
     table(["Original", "In packet", "In catalog"], [...data.sources, ...(data.support_sources || [])].map(row => [row.name, row.packet, row.local])),
     table(["Evidence", "Checksum"], data.files.map(row => [row.name, row.status])),
     data.unexpected_files.length ? h("p", {class: "error"}, `Extra files: ${data.unexpected_files.join(", ")}`) : null,
+  ];
+}
+
+const readingStatus = {retested: "Re-measured", failed: "Not confirmed", "not-included": "Not packed", incomplete: "Incomplete evidence"};
+
+export function showBatchPacket(data) {
+  const summary = data.summary ?? {};
+  const priorityScore = summary.priority_requested
+    ? `${summary.priority_retested} / ${summary.priority_requested}`
+    : `${summary.priority_retested ?? 0}`;
+  const rows = (data.readings ?? []).map(row => {
+    const details = row.status === "retested"
+      ? row.channels.map(channel => `${channel.channel} ${p(channel.measured_median, 5)} D`).join(" · ")
+      : row.reasons.join("; ");
+    return [row.title, row.priority ? "protected" : "", readingStatus[row.status] ?? row.status, details];
+  });
+  return [
+    h("header", {class: "result-heading"},
+      h("div", {}, h("p", {class: "eyebrow"}, "BATCH RE-CHECK"),
+        h("h3", {}, data.status === "retested" ? "Every packed reading measured again" : "Some readings need review"))),
+    metrics([
+      ["Re-measured", `${summary.retested ?? 0} / ${summary.included ?? 0} packed`],
+      ["Protected re-measured", priorityScore],
+      ["Listed", summary.requested ?? 0],
+      ["Not packed", summary.not_included ?? 0],
+      ["Incomplete", summary.incomplete ?? 0],
+      ["Tolerance", p(data.tolerance, 5, " D")],
+    ]),
+    h("p", {class: "muted"}, `Byte ceiling ${data.capacity_bytes ?? "—"} · package ${data.package_bytes ?? "—"} bytes`),
+    table(["Reading", "Priority", "Result", "Detail"], rows),
+    (data.changed_files ?? []).length ? h("p", {class: "error"}, `Changed or unreadable files: ${data.changed_files.join(", ")}`) : null,
+    (data.missing_files ?? []).length ? h("p", {class: "error"}, `Missing files: ${data.missing_files.join(", ")}`) : null,
+    (data.unexpected_files ?? []).length ? h("p", {class: "error"}, `Extra files: ${data.unexpected_files.join(", ")}`) : null,
+  ];
+}
+
+export function showBatchPlan(data) {
+  const summary = data.summary ?? {};
+  const rows = (data.readings ?? []).map(row => {
+    const detail = row.status === "included"
+      ? row.evidence
+        ? `scan + flat + dark`
+        : ""
+      : (row.missing?.join("; ") || row.reason || "");
+    return [
+      row.title,
+      row.priority ? "protected" : "",
+      row.status === "included" ? "packed" : row.status === "incomplete" ? "incomplete evidence" : "not packed",
+      detail,
+    ];
+  });
+  return [
+    h("header", {class: "result-heading"},
+      h("div", {}, h("p", {class: "eyebrow"}, "PLANNED PACKAGE"),
+        h("h3", {}, "Offline re-check package ready"))),
+    metrics([
+      ["Evidence-complete packed", `${summary.included ?? 0} / ${summary.retestable_available ?? 0}`],
+      ["Protected packed", `${summary.priority_included ?? 0} / ${summary.priority_requested ?? 0}`],
+      ["Requested", summary.requested ?? 0],
+      ["Incomplete", summary.incomplete ?? 0],
+      ["Package bytes", data.package_bytes ?? "—"],
+      ["Ceiling", data.capacity_bytes ?? "—"],
+    ]),
+    link("Download ZIP", `/api/batch-packages/${data.token}/download`, {download: true}),
+    table(["Reading", "Priority", "Plan", "Detail"], rows),
   ];
 }

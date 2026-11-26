@@ -9,6 +9,7 @@ from threading import BoundedSemaphore
 from flask import Flask, jsonify, request, send_file, send_from_directory
 from werkzeug.exceptions import BadRequest, RequestEntityTooLarge
 
+from .batch import BatchStore, build_batch_package, list_density_readings
 from .catalog import Catalog
 from .evidence import KIND_TITLES, packet_zip, record_csv, record_manifest, safe_original_name, tagged_name
 from .operations import Operations
@@ -31,6 +32,7 @@ class Services:
     workspace: Workspace
     operations: Operations
     previews: BoundedSemaphore
+    batches: BatchStore
 
 
 def _body():
@@ -111,7 +113,7 @@ def create_app(storage=None, *, seed_demo=None):
     )
     catalog = Catalog(storage or Path(os.environ.get("REELDESK_DATA", str(DEFAULT_DATA))))
     workspace = Workspace(catalog)
-    services = Services(catalog, workspace, Operations(workspace), BoundedSemaphore(2))
+    services = Services(catalog, workspace, Operations(workspace), BoundedSemaphore(2), BatchStore())
     if seed_demo is None:
         seed_demo = os.environ.get("REELDESK_DEMO", "1") == "1"
     if seed_demo:
@@ -359,6 +361,23 @@ def register_review(app, services):
         _, content = _file("packet", PACKET_UPLOAD_LIMIT)
         local = _flag(request.args, "local", True)
         return jsonify(verify_packet(content, catalog if local else None))
+
+    @app.get("/api/rolls/<roll_id>/batch-readings")
+    def batch_readings(roll_id):
+        items, truncated = list_density_readings(catalog, roll_id)
+        return jsonify({"items": items, "truncated": truncated, "limit": 200})
+
+    @app.post("/api/rolls/<roll_id>/batch-package")
+    def plan_batch_package(roll_id):
+        data, report = build_batch_package(catalog, roll_id, _body())
+        name = tagged_name(f"{catalog.get_roll(roll_id)['code']}-recheck", "recheck", "zip")
+        token = services.batches.put(data, report, name)
+        return jsonify({**report, "token": token, "name": name}), 201
+
+    @app.get("/api/batch-packages/<token>/download")
+    def download_batch_package(token):
+        data, name = services.batches.get(token)
+        return _binary(data, "application/zip", filename=name)
 
 
 def main():

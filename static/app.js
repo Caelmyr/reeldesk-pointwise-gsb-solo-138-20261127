@@ -1,6 +1,6 @@
 import {$, button, checkbox, describeDate, formValues, h, input, link, message, numberField, request, select, svg, table, textarea} from "./ui.js";
 import {panelNodes} from "./panels.js";
-import {resultNodes, showPacket} from "./results.js";
+import {resultNodes, showBatchPlan, showPacket} from "./results.js";
 
 const state = {
   rolls: [], roll: null, scans: [], scan: null, marks: [], records: [], operationTitles: {},
@@ -9,6 +9,7 @@ const state = {
   peerId: "", alignment: null, alignMethod: "patch", landmarks: [],
   wedge: [], cutPlan: null, cutOptions: {kerf_mm: .16, reserve_mm: .7, retained: "both"},
   lastDust: null, restore: new Set(), pickedDust: null,
+  batchReadings: [], batchSelection: new Set(), batchPriority: new Set(), batchLimit: 4 * 1024 * 1024, batchTolerance: .02,
   calibration: cleanCalibration(), peerCalibration: cleanCalibration(),
   tone: {shadow: .08, highlight: 1.75, gamma: 1, neutralize: false, brightness: 0},
   preview: null, requestId: 0, previewRequest: null, loadId: 0, working: false,
@@ -378,15 +379,20 @@ async function refreshMarks() {
 
 async function loadRoll(id, desiredScan = null) {
   const stamp = ++state.requestId;
-  const [roll, collection, records] = await Promise.all([
+  const [roll, collection, records, batch] = await Promise.all([
     request(`/api/rolls/${id}`),
     request(`/api/rolls/${id}/scans`),
     request(`/api/rolls/${id}/records`),
+    request(`/api/rolls/${id}/batch-readings`),
   ]);
   if (stamp !== state.requestId) return;
   state.roll = roll;
   state.scans = collection.items;
   state.records = records.items;
+  state.batchReadings = batch.items;
+  state.batchTruncated = batch.truncated;
+  state.batchSelection = new Set(batch.items.filter(item => item.retestable).map(item => item.id));
+  state.batchPriority = new Set();
   storage.write("reeldesk.roll", roll.id);
   const matching = state.scans.find(item => item.id === desiredScan);
   await selectScan(matching || state.scans.find(item => item.role === "scan") || state.scans[0]);
@@ -395,9 +401,16 @@ async function loadRoll(id, desiredScan = null) {
 async function refreshRecords() {
   if (!state.roll) return;
   const id = state.roll.id;
-  const data = await request(`/api/rolls/${id}/records`);
+  const [data, batch] = await Promise.all([
+    request(`/api/rolls/${id}/records`),
+    request(`/api/rolls/${id}/batch-readings`),
+  ]);
   if (state.roll?.id === id) {
     state.records = data.items;
+    state.batchReadings = batch.items;
+    const available = new Set(batch.items.map(item => item.id));
+    state.batchSelection = new Set([...state.batchSelection].filter(identifier => available.has(identifier)));
+    state.batchPriority = new Set([...state.batchPriority].filter(identifier => available.has(identifier)));
     renderPanel();
   }
 }
@@ -726,6 +739,45 @@ function recordDecision(entry) {
   });
 }
 
+function toggleBatchRecord(identifier, checked) {
+  if (checked) state.batchSelection.add(identifier);
+  else {
+    state.batchSelection.delete(identifier);
+    state.batchPriority.delete(identifier);
+  }
+  renderPanel();
+}
+
+function toggleBatchPriority(identifier, checked) {
+  if (checked) {
+    state.batchSelection.add(identifier);
+    state.batchPriority.add(identifier);
+  } else {
+    state.batchPriority.delete(identifier);
+  }
+  renderPanel();
+}
+
+async function planBatchPackage(form) {
+  if (!state.batchSelection.size) throw Error("Choose at least one saved reading to pack.");
+  const values = formValues(form);
+  state.batchLimit = +values.max_bytes;
+  state.batchTolerance = +values.tolerance;
+  const reply = await request(`/api/rolls/${state.roll.id}/batch-package`, {
+    method: "POST",
+    data: {
+      record_ids: [...state.batchSelection],
+      priority_ids: [...state.batchPriority],
+      max_bytes: state.batchLimit,
+      tolerance: state.batchTolerance,
+    },
+  });
+  const result = $("result-section");
+  result.replaceChildren(...showBatchPlan(reply));
+  result.hidden = false;
+  result.scrollIntoView({block: "nearest"});
+}
+
 async function verifyPacket(form) {
   const data = await request("/api/packets/verify", {method: "POST", file: new FormData(form)});
   const result = $("result-section");
@@ -838,6 +890,9 @@ const actions = {
   restoreChoices: perform(restoreChoices), checkDust: perform(checkDust),
   openRecord: perform(openRecord), saveJob: perform(saveJob), recordDecision, restoreAlignment: perform(restoreAlignment),
   verifyPacket: perform(verifyPacket), openActivity: perform(openActivity),
+  toggleBatchRecord, toggleBatchPriority, planBatchPackage: perform(planBatchPackage),
+  selectAllBatch: () => { state.batchSelection = new Set(state.batchReadings.filter(item => item.retestable).map(item => item.id)); renderPanel(); },
+  clearBatch: () => { state.batchSelection = new Set(); state.batchPriority = new Set(); renderPanel(); },
 };
  
 function attach() {

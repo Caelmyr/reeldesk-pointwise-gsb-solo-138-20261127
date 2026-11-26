@@ -156,9 +156,42 @@ function stripDesk(state, actions) {
   ];
 }
 
+function batchDesk(state, actions) {
+  const readings = state.batchReadings ?? [];
+  const selected = state.batchSelection;
+  const ready = readings.filter(item => item.retestable).length;
+  const rows = readings.map(item => h("tr", {},
+    h("td", {}, h("input", {type: "checkbox", checked: selected.has(item.id),
+      onchange: event => actions.toggleBatchRecord(item.id, event.target.checked), "aria-label": `Include ${item.title}`})),
+    h("td", {}, h("span", {title: item.title}, item.title), h("small", {}, ` · ${item.scan_name ?? "scan"}`)),
+    h("td", {}, h("input", {type: "checkbox", checked: state.batchPriority.has(item.id),
+      onchange: event => actions.toggleBatchPriority(item.id, event.target.checked), "aria-label": `Protect ${item.title}`})),
+    h("td", {}, item.retestable ? "ready" : (item.missing.join("; ") || "incomplete"))));
+  return section("Offline re-check package",
+    state.batchTruncated ? message("Only the newest 200 saved density readings are listed here.") : null,
+    message("Packs saved density readings with the original scan, the flat and dark controls used, and the measurement box. "
+      + "Files are stored once by content hash. Every chosen reading stays in the list; only readings with complete evidence can be re-measured."),
+    readings.length
+      ? [
+        props("stack",
+          button("Select every ready reading", actions.selectAllBatch, "text-button"),
+          button("Clear selection", actions.clearBatch, "text-button")),
+        h("div", {class: "small-table"}, h("table", {},
+          h("thead", {}, h("tr", {}, ["Pack", "Saved reading", "Protect", "Evidence"].map(label => h("th", {scope: "col"}, label)))),
+          h("tbody", {}, rows))),
+        form(actions.planBatchPackage, "Plan package", [
+          num("max_bytes", "Byte ceiling", state.batchLimit, 8192, 90 * 1024 * 1024, 1024),
+          num("tolerance", "Median density tolerance D", state.batchTolerance, .001, 1, .001),
+          message(`${selected.size} chosen · ${ready} ready to re-measure`),
+        ]),
+      ]
+      : message("Save a region-density reading to build a package."));
+}
+
 function archiveDesk(state, actions) {
   const saved = state.records ?? [];
   return [
+    batchDesk(state, actions),
     section("Proof and contact sheet",
       form(element => actions.run("proof", element), "Make scan proof", [
         checkbox("annotate", "Show saved marks", true),
@@ -182,7 +215,7 @@ function archiveDesk(state, actions) {
         : message("Save a working result to keep its settings and evidence here.")),
     section("Review packet",
       form(actions.verifyPacket, "Verify ZIP", [
-        input("packet", "ReelDesk review packet", "", {type: "file", accept: ".zip,application/zip", required: true})
+        input("packet", "ReelDesk review or re-check ZIP", "", {type: "file", accept: ".zip,application/zip", required: true})
       ], "quiet"),
       props("stack", button("Roll activity", actions.openActivity, "text-button"),
         link("Original file", `/api/scans/${state.scan.id}/original`, {download: true}))),

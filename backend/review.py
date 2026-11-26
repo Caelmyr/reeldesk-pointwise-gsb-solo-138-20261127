@@ -5,12 +5,14 @@ from pathlib import PurePosixPath
 from zipfile import BadZipFile, ZipFile
 import re
 
+from .batch import BATCH_FORMAT, verify_batch_packet
 from .evidence import record_csv
 from .values import DeskError, checked_key, clean_text, missing, parse_json, payload_hash
 
 
 PACKET_UPLOAD_LIMIT = 95 * 1024 * 1024
-PACKET_EXPANDED_LIMIT = 130 * 1024 * 1024
+PACKET_EXPANDED_LIMIT = 320 * 1024 * 1024
+PACKET_MEMBER_LIMIT = 700
 SHASUM = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -45,13 +47,13 @@ def _read_members(archive):
     seen = {}
     total = 0
     members = archive.infolist()
-    if len(members) > 65:
-        raise _packet_error("Use a packet with at most 65 files.")
+    if len(members) > PACKET_MEMBER_LIMIT:
+        raise _packet_error("Use a packet with at most 700 files.")
     for info in members:
         name = _validate_member(info, seen)
         total += info.file_size
         if total > PACKET_EXPANDED_LIMIT:
-            raise _packet_error("The packet expands beyond the supported 130 MiB.")
+            raise _packet_error("The packet expands beyond the supported 320 MiB.")
         seen[name] = info
     return seen
 
@@ -65,9 +67,13 @@ def _packet_manifest(archive, members):
         manifest = parse_json(data)
     except (ValueError, TypeError, BadZipFile, RuntimeError, UnicodeError) as error:
         raise _packet_error("The packet manifest is invalid.") from error
-    if not isinstance(manifest, dict) or manifest.get("format") != "reeldesk-review-v1":
+    if not isinstance(manifest, dict) or manifest.get("format") not in {"reeldesk-review-v1", BATCH_FORMAT}:
         raise _packet_error("Choose an exported ReelDesk review packet.")
-    if not isinstance(manifest.get("record"), dict) or not isinstance(manifest.get("result"), dict):
+    if not isinstance(manifest.get("record"), dict) and manifest.get("format") != BATCH_FORMAT:
+        raise _packet_error("The review packet is missing its record or result.")
+    if manifest.get("format") == BATCH_FORMAT:
+        return manifest, data
+    if not isinstance(manifest.get("result"), dict):
         raise _packet_error("The review packet is missing its record or result.")
     if not isinstance(manifest.get("sources"), list) or not isinstance(manifest.get("files"), list):
         raise _packet_error("The review packet is missing source and file details.")
@@ -212,6 +218,8 @@ def verify_packet(blob, catalog=None):
     with _unpack(blob) as archive:
         members = _read_members(archive)
         manifest, data = _packet_manifest(archive, members)
+        if manifest.get("format") == BATCH_FORMAT:
+            return verify_batch_packet(archive, members, manifest, data, packet_bytes=len(blob))
         files, expected = _checked_evidence(archive, members, manifest)
         sources = [_source_member(archive, members, source, catalog, expected) for source in manifest["sources"]]
         roles = [source["role"] for source in sources]
