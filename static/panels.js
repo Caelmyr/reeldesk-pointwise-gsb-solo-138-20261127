@@ -127,6 +127,12 @@ function repeatPass(state, actions) {
 
 function stripDesk(state, actions) {
   const checks = [["frames", "Suggest frame boxes"], ["perforations", "Perforation pitch"], ["carrier", "Carrier rails"]];
+  const gripOptions = state.marks
+    .filter(mark => mark.kind === "grip")
+    .map(mark => [mark.id, mark.label]);
+  const plan = state.dissectionPlan;
+  const gripHint = gripOptions.length ? null
+    : message("No Grip marks yet. Draw boxes on the blank margin and save them as the Grip type.");
   return [
     section("Strip measurements",
       form(element => actions.run(element.elements.check.value, element), "Run strip check", [
@@ -147,6 +153,53 @@ function stripDesk(state, actions) {
         button("Use selected as actual", () => actions.run("cut-verified")),
         button("Clear planned line", actions.clearCut, "text-button")) : null,
     ),
+    section("Cut sequence plan",
+      message("Mark Grip boxes on the blank margin, pick the two starting clamps, then let the planner order the cuts."),
+      form(element => actions.run("cut-plan", element), "Plan cut sequence", [
+        gripHint,
+        props("columns-2",
+          select("start_grip_a", "Starting clamp 1", gripOptions, ""),
+          select("start_grip_b", "Starting clamp 2", gripOptions, "")),
+        props("columns-2",
+          num("min_grip_mm", "Min clamp contact (mm)", 3, .1, 120, .1),
+          num("reach_mm", "Max grip-to-blade (mm)", 60, .1, 400, .5)),
+        props("columns-2",
+          num("bag_min_mm", "Default pouch min (mm)", state.pouchOptions.bag_min_mm, 0, 400, .1),
+          num("bag_max_mm", "Default pouch max (mm)", state.pouchOptions.bag_max_mm, .1, 400, .1)),
+        num("preferred_frame", "Keep leader longest on frame", state.pouchOptions.preferred_frame || "", 1, 40, 1),
+        h("details", {}, h("summary", {}, `Per-frame pouch ranges (${state.bagRanges.length})`),
+          props("stack",
+            form(actions.addBagRange, "Add range", [
+              props("columns-3",
+                num("bag_frame", "Frame", "", 1, 40, 1),
+                num("bag_min", "Min mm", 0, 0, 400, .1),
+                num("bag_max", "Max mm", 100, .1, 400, .1)),
+            ], "quiet"),
+            state.bagRanges.length
+              ? table(["Frame", "Min mm", "Max mm", ""], state.bagRanges.map(item =>
+                  [item.frame, item.min_mm, item.max_mm,
+                   button("Remove", () => actions.removeBagRange(item.frame), "text-button")]))
+              : message("No overrides; the default pouch range applies to every frame."))),
+      ]),
+      plan ? props("stack",
+        button("Adopt this sequence", () => actions.adoptPlan(plan), "primary"),
+        message(`Planned ${plan.result.cut_count} cuts with ${plan.result.clamp_moves} clamp move(s). ` +
+          (plan.result.leader
+            ? `Frame ${plan.result.leader.frame} keeps ${plan.result.leader.chosen_min_leader_mm} mm leader ` +
+              `(sacrifices ${plan.result.leader.sacrificed_mm} mm).`
+            : ""))) : null,
+    ),
+    plan ? section("Observed cuts and pouch check",
+      message("Adopt the plan, then for each boundary set the planned line, draw the observed cut and record it."),
+      ...plan.result.cuts.map(cut => cutRow(state, actions, cut)),
+      form(element => actions.run("pouch-check", element), "Check pouch widths", [
+        num("tolerance", "Cut offset tolerance (mm)", .25, .02, 4, .01),
+        props("columns-2",
+          num("bag_min_mm", "Pouch min (mm)", state.pouchOptions.bag_min_mm, 0, 400, .1),
+          num("bag_max_mm", "Pouch max (mm)", state.pouchOptions.bag_max_mm, .1, 400, .1)),
+      ]),
+      button("Clear observed cuts", actions.resetObserved, "text-button"),
+    ) : null,
     section("Native frame masters",
       form(element => actions.run("masters", element), "Export frame masters", [
         select("format", "Lossless format", [["tiff", "TIFF"], ["png", "PNG"]], "tiff"),
@@ -154,6 +207,35 @@ function stripDesk(state, actions) {
         checkbox("useRegion", "Export selection instead of saved frames", false),
       ], "quiet")),
   ];
+}
+
+function cutRow(state, actions, cut) {
+  const recorded = state.observedCuts[cut.boundary];
+  const setPlanned = () => {
+    state.cutPlan = cut.line;
+    state.tool = "line";
+    actions.refreshStrip?.();
+  };
+  const verified = state.lastVerifiedCut;
+  const canRecord = Boolean(verified && verified.settings.planned
+    && verified.settings.planned.start.x === cut.line.start.x
+    && verified.settings.planned.end.x === cut.line.end.x);
+  return h("div", {class: "cut-row"},
+    h("strong", {}, `Boundary ${cut.boundary} · column ${cut.column}`),
+    recorded
+      ? message(`Observed recorded · actual x ${recorded.actual.start.x}`)
+      : props("stack",
+          button("Set planned line", setPlanned, "quiet"),
+          button("Use selected as actual", () => actions.run("cut-verified"), "quiet",
+            {disabled: !state.line}),
+          button("Record verified actual",
+            () => actions.recordActualCut(cut.boundary, {
+              plan: cut,
+              observed: {line: verified.result.observed.line, status: verified.result.status},
+            }),
+            "quiet", {disabled: !canRecord}),
+          canRecord ? message(`Last verification: ${verified.result.status} · offset ${verified.result.offset_mm} mm`)
+            : message("Set the planned line, draw the observed cut, then use it as actual.")));
 }
 
 function archiveDesk(state, actions) {

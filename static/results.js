@@ -20,6 +20,11 @@ const presentation = {
   restore: x => [["Restored pixels", x.restored_pixels], ["Held back", x.unfilled_pixels], ["Findings", x.restored_findings.join(", ")]],
   grain: x => [["Usable region", asPercent(x.coverage)], ["Measured scales", x.bands.length]],
   cut: x => [["Status", x.status], ["Closest mark", p(x.min_clearance_mm, 3, " mm")], ["Suggested positions", x.candidates.length]],
+  "cut-plan": x => [["Cuts", x.cut_count], ["Clamp moves", x.clamp_moves],
+    ["Leader sacrifice", x.leader ? p(x.leader.sacrificed_mm, 3, " mm") : "—"],
+    ["Preferred frame", x.leader ? x.leader.frame : "—"]],
+  "pouch-check": x => [["Status", x.status], ["Held frames", x.held_frames.length],
+    ["Measured cuts", x.cuts.length], ["Confirmed cells", x.frames.filter(f => f.status === "confirmed").length]],
   "cut-verified": x => [["Status", x.status], ["Largest offset", p(x.offset_mm, 3, " mm")], ["Allowed offset", p(x.allowed_offset_mm, 3, " mm")]],
   frames: x => [["Frame boxes", x.frames.length], ["Possible gaps", x.gaps.length]],
   perforations: x => [["Median pitch", p(x.pitch_px, 3, " px")], ["Estimated DPI", p(x.dpi_estimate, 1)]],
@@ -121,6 +126,29 @@ function extendedTable(kind, data, state, actions, interactive) {
       [item.label, item.kind, item.side, p(item.clearance_mm, 3, " mm")])),
     interactive && data.status === "clear" ? button("Set planned cut", () => actions.useCut(data.line), "quiet") : null,
   ];
+  if (kind === "cut-plan") return [
+    table(["Cut", "Column", "Left grip", "Right grip", "Moves", "Total moves"],
+      [...data.steps].sort((a, b) => a.cut - b.cut).map(step =>
+        [step.cut, step.column, `${step.left_grip.label} (${p(step.left_grip.blade_distance_mm, 1)} mm)`,
+         `${step.right_grip.label} (${p(step.right_grip.blade_distance_mm, 1)} mm)`,
+         step.moves, step.cumulative_moves])),
+    table(["Frame", "Cell width mm", "Pouch min–max", "Left leader", "Right leader", "Fits"],
+      data.frames.map(frame =>
+        [frame.frame, p(frame.cell_width_mm, 2), `${p(frame.bag_min_mm, 1)}–${p(frame.bag_max_mm, 1)}`,
+         p(frame.left_leader_mm, 2, " mm"), p(frame.right_leader_mm, 2, " mm"), frame.fits ? "yes" : "NO"])),
+    data.leader ? h("p", {class: "help"},
+      `Frame ${data.leader.frame} (${data.leader.label}) keeps a ${p(data.leader.chosen_min_leader_mm, 3)} mm minimum ` +
+      `leader; the widest feasible minimum would be ${p(data.leader.best_min_leader_mm, 3)} mm, so this plan ` +
+      `sacrifices ${p(data.leader.sacrificed_mm, 3)} mm.`) : null,
+    interactive ? button("Adopt sequence for observed cuts", () => actions.adoptPlan(entry), "primary") : null,
+  ];
+  if (kind === "pouch-check") return [
+    table(["Cut", "Status", "Offset mm", "Allowed mm"], data.cuts.map(cut =>
+      [cut.boundary, cut.status, p(cut.offset_mm, 3), p(cut.allowed_offset_mm, 3)])),
+    table(["Frame", "Status", "Min width", "Max width", "Pouch range", "Reason"], data.frames.map(frame =>
+      [frame.frame, frame.status, p(frame.min_width_mm, 3, " mm"), p(frame.max_width_mm, 3, " mm"),
+       `${p(frame.bag_min_mm, 1)}–${p(frame.bag_max_mm, 1)} mm`, frame.reason ?? ""])),
+  ];
   if (kind === "frames") return table(["Frame", "Box", "Apply"], data.frames.map((item, index) =>
     [index + 1, `${item.box.x}, ${item.box.y} · ${item.box.w} × ${item.box.h}`,
       interactive ? button("Mark frame", () => actions.markFrame(item.box, index), "text-button") : "—"]));
@@ -167,7 +195,8 @@ export function resultNodes(entry, state, actions, saved) {
     h("div", {class: "stack"},
       info.map(file => link(file.name, `${file.url}?download=1`, {download: true})),
       saved ? link("ZIP with originals", `/api/records/${entry.id}/packet?originals=1`, {download: true}) : null,
-      saved && ["profile", "calibration", "density", "dust", "residual", "compare", "cut", "cut-verified", "grain",
+      saved && ["profile", "calibration", "density", "dust", "residual", "compare", "cut", "cut-plan",
+        "cut-verified", "pouch-check", "grain",
         "coverage", "wedge", "carrier"].includes(entry.kind)
         ? link("Reading CSV", `/api/records/${entry.id}/csv`, {download: true}) : null,
       saved && entry.kind === "registration" && entry.scan_id === state.scan.id

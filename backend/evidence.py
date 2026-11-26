@@ -41,7 +41,9 @@ KIND_TITLES = {
     "dust-check": "Repeat-pass dust check",
     "restore": "Local dust retouch",
     "cut": "Cut clearance check",
+    "cut-plan": "Cut sequence plan",
     "cut-verified": "Observed cut",
+    "pouch-check": "Pouch width check",
     "frames": "Frame boxes",
     "perforations": "Perforation survey",
     "grain": "Grain survey",
@@ -117,6 +119,16 @@ def result_rows(kind, result):
         value = result.get("observed", result)
         keys = ["mark_id", "label", "kind", "side", "clearance_mm", "crosses", "within_reserve"]
         return keys, [[mark[key] for key in keys] for mark in value["conflicts"] + value["clear_marks"]]
+    if kind == "cut-plan":
+        keys = ["cut", "column", "moves", "cumulative_moves"]
+        rows = [
+            [step[key] for key in keys]
+            for step in sorted(result["steps"], key=lambda item: item["cut"])
+        ]
+        return keys, rows
+    if kind == "pouch-check":
+        keys = ["frame", "label", "status", "min_width_mm", "max_width_mm", "bag_min_mm", "bag_max_mm", "reason"]
+        return keys, [[row.get(key) for key in keys] for row in result["frames"]]
     if kind == "grain":
         keys = ["radius", "samples", "mad", "p95"]
         return keys, [[band[key] for key in keys] for band in result["bands"]]

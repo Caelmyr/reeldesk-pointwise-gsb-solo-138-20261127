@@ -90,6 +90,9 @@ h3, h4 { font-weight: 650; }
 #scan-overlay .saved-box.is-keep { stroke: #99cbac; stroke-dasharray: 3 3; }
 #scan-overlay .saved-box.is-reference { stroke: #8ab3e0; stroke-dasharray: 3 3; }
 #scan-overlay .saved-box.is-dust, #scan-overlay .saved-box.is-scratch { stroke: #e98185; }
+#scan-overlay .saved-box.is-grip { stroke: #e6c05b; stroke-dasharray: 5 2; fill: #e6c05b14; }
+#scan-overlay .saved-box.is-perforation { stroke: #8ddacc; }
+#scan-overlay .saved-box.is-frame { stroke: #edd9a8; }
 #scan-overlay .live-drawing { fill: #eed2981d; stroke: #f8d790; stroke-width: 1.7; }
 #scan-overlay #comparison-reference { stroke: #83b1e4; fill: #83b1e418; stroke-width: 1.5; }
 .image-state { position: absolute; color: var(--muted); font-size: 13px; pointer-events: none; }
@@ -108,6 +111,7 @@ h3, h4 { font-weight: 650; }
 .mark-dot { flex: 0 0 6px; height: 6px; border-radius: 50%; background: var(--accent); }
 .mark-dot.keep { background: #99cbac; }
 .mark-dot.reference { background: #8ab3e0; }
+.mark-dot.grip { background: #e6c05b; }
 .mark-dot.dust, .mark-dot.scratch { background: #e98185; }
 .inspector { border-left: 1px solid var(--border); min-width: 0; }
 .inspector-tabs { display: grid; grid-template-columns: repeat(4,1fr); gap: 0; min-height: 50px; padding: 0 10px; align-items: stretch; border-bottom: 1px solid var(--border); }
@@ -120,6 +124,8 @@ h3, h4 { font-weight: 650; }
 .panel-block:last-child { border-bottom: none; }
 .panel-block h3 { font-size: 13px; margin-bottom: 10px; }
 .panel-block p.help { margin: 3px 0 10px; color: var(--muted); line-height: 1.45; font-size: 11px; }
+.cut-row { border: 1px solid var(--border); border-radius: var(--r); padding: 8px 9px; margin-bottom: 8px; background: #24251f; }
+.cut-row strong { font-size: 11px; color: var(--accent-hi); display: block; margin-bottom: 5px; }
 .label-field { display: flex; min-width: 0; flex-direction: column; gap: 4px; margin-bottom: 9px; color: #cbc6b9; }
 .label-field span { font-size: 11px; font-weight: 600; }
 .label-field input, .label-field select, .label-field textarea { width: 100%; min-width: 0; }

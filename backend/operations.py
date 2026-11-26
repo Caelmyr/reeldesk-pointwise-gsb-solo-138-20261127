@@ -8,6 +8,9 @@ from PIL import Image
 from .carrier import CarrierSettings, carrier_overlay, inspect_carrier
 from .coverage import CoverageSettings, coverage_map, measure_coverage
 from .density_master import DensityMasterOptions, make_density_master
+from .dissector import (
+    build_cut_plan, evaluate_pouches, plan_preview, pouch_preview,
+)
 from .focus import FocusOptions, focus_proof, measure_focus
 from .masters import MasterRequest, create_masters, crop_list
 from .wedge import WedgeSpec, assess_wedge, wedge_chart
@@ -65,7 +68,9 @@ class Operations:
             "restore": self._restore,
             "grain": self._grain,
             "cut": self._cut,
+            "cut-plan": self._cut_plan,
             "cut-verified": self._cut_verified,
+            "pouch-check": self._pouch_check,
             "frames": self._frames,
             "perforations": self._perforations,
             "proof": self._proof,
@@ -327,6 +332,56 @@ class Operations:
         img = marked_strip_image(source.image, options.guide, marks, guides=lines)
         return Report(
             "cut-verified", settings, result, images=(attachment(img, "observed-cut"),), marks_version=self.catalog.marks_version(marks)
+        )
+
+    def _cut_plan(self, source, value):
+        marks = self.catalog.list_marks(source.id)
+        settings, options, result = build_cut_plan(marks, value.get("cut"), value.get("plan"), source.metadata)
+        img = plan_preview(source, settings, result, marks)
+        config = {
+            "cut": settings.as_dict(),
+            "plan": {
+                "min_grip_mm": options.min_grip_mm,
+                "reach_mm": options.reach_mm,
+                "bag_min_mm": options.default_bag.minimum_mm,
+                "bag_max_mm": options.default_bag.maximum_mm,
+                "bags": list(options.bags),
+                "start_grips": list(options.start_grips),
+                "preferred_frame": options.preferred_frame,
+            },
+            "marks": marks,
+        }
+        return Report(
+            "cut-plan", config, result, images=(attachment(img, "cut-sequence-plan"),),
+            marks_version=self.catalog.marks_version(marks),
+        )
+
+    def _pouch_check(self, source, value):
+        options = CutSettings.read(value.get("cut"), source.metadata)
+        marks = self.catalog.list_marks(source.id)
+        tolerance = number(value.get("tolerance", .25), "tolerance", lower=.02, upper=4)
+        observed = sequence(value.get("observed"), "observed", minimum=1, maximum=40)
+        pouch = mapping(value.get("pouch"), "pouch") if value.get("pouch") is not None else {}
+        result = evaluate_pouches(marks, options, tolerance, pouch, observed)
+        status_by_boundary = {check["boundary"]: check["status"] for check in result["cuts"]}
+        observed_lines = [
+            {
+                "planned": mapping(item, "observed")["planned"],
+                "actual": mapping(item, "observed")["actual"],
+                "status": status_by_boundary[
+                    integer(mapping(item, "observed")["boundary"], "observed.boundary", lower=1)
+                ],
+            }
+            for item in observed
+        ]
+        img = pouch_preview(source, options, result, marks, observed_lines)
+        settings = {
+            "cut": options.as_dict(), "tolerance": tolerance, "pouch": pouch,
+            "observed": observed, "marks": marks,
+        }
+        return Report(
+            "pouch-check", settings, result, images=(attachment(img, "pouch-width-check"),),
+            marks_version=self.catalog.marks_version(marks),
         )
 
     def _frames(self, source, value):

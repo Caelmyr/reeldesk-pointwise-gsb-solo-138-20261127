@@ -14,7 +14,7 @@ from .values import (
 )
 
 
-BOX_MARKS = frozenset({"frame", "dust", "scratch", "perforation", "reference", "keep"})
+BOX_MARKS = frozenset({"frame", "dust", "scratch", "perforation", "reference", "keep", "grip"})
 CUT_SIDES = frozenset({"left", "right", "both"})
 MARK_COLORS = {
     "frame": "#edd9a8",
@@ -24,6 +24,7 @@ MARK_COLORS = {
     "perforation": "#8ddacc",
     "reference": "#9fc3fc",
     "keep": "#a1e7a5",
+    "grip": "#e6c05b",
 }
 STOCK_PITCH_MM = {"135": 4.75, "120": None, "other": None}
 

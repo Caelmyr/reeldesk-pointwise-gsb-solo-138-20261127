@@ -8,13 +8,15 @@ const state = {
   box: null, line: null, point: null, reference: null, drag: null, activeMark: null,
   peerId: "", alignment: null, alignMethod: "patch", landmarks: [],
   wedge: [], cutPlan: null, cutOptions: {kerf_mm: .16, reserve_mm: .7, retained: "both"},
+  dissectionPlan: null, observedCuts: {}, bagRanges: [], lastVerifiedCut: null,
+  pouchOptions: {bag_min_mm: 0, bag_max_mm: 400, preferred_frame: ""},
   lastDust: null, restore: new Set(), pickedDust: null,
   calibration: cleanCalibration(), peerCalibration: cleanCalibration(),
   tone: {shadow: .08, highlight: 1.75, gamma: 1, neutralize: false, brightness: 0},
   preview: null, requestId: 0, previewRequest: null, loadId: 0, working: false,
 };
 
-const defaultMarks = ["frame", "keep", "reference", "dust", "scratch", "perforation", "cut"];
+const defaultMarks = ["frame", "keep", "reference", "grip", "dust", "scratch", "perforation", "cut"];
 const descriptions = {scan: "Film scan", flat: "Backlight flat", dark: "Shutter dark", reference: "Reference image"};
 const media = [["negative", "Color or B&W negative"], ["transparency", "Transparency"], ["paper", "Paper positive"], ["control", "Scanner control"]];
 const decisions = [["hold", "Hold"], ["accepted", "Accepted"], ["rejected", "Rejected"]];
@@ -147,7 +149,7 @@ function renderMarks() {
     container.append(h("p", {class: "muted"}, "No saved marks."));
     return;
   }
-  const priority = {frame: 0, reference: 1, keep: 2, cut: 3, perforation: 4, scratch: 5, dust: 6};
+  const priority = {frame: 0, reference: 1, keep: 2, grip: 3, cut: 4, perforation: 5, scratch: 6, dust: 7};
   const ordered = [...state.marks].sort((a, b) => priority[a.kind] - priority[b.kind] ||
     (a.geometry.x ?? a.geometry.start.x) - (b.geometry.x ?? b.geometry.start.x) ||
     a.label.localeCompare(b.label));
@@ -346,6 +348,11 @@ async function selectScan(scan, {persist = true} = {}) {
   state.mode = scan?.role === "scan" ? "positive" : "raw";
   state.tool = "box";
   state.cutOptions = {kerf_mm: .16, reserve_mm: .7, retained: "both"};
+  state.dissectionPlan = null;
+  state.observedCuts = {};
+  state.bagRanges = [];
+  state.lastVerifiedCut = null;
+  state.pouchOptions = {bag_min_mm: 0, bag_max_mm: 400, preferred_frame: ""};
   if (state.preview) URL.revokeObjectURL(state.preview);
   state.preview = null;
   $("scan-image").removeAttribute("src");
@@ -434,6 +441,32 @@ function operationArgs(kind, element, overrides) {
         dpi: +fields.dpi, retained: fields.retained, guide: region};
       return {kind, cut: options, line: state.line};
     }
+    case "cut-plan": {
+      const cut = state.cutOptions = {kerf_mm: +fields.kerf_mm, reserve_mm: +fields.reserve_mm,
+        dpi: +fields.dpi, retained: fields.retained, guide: region};
+      const startGrips = [fields.start_grip_a, fields.start_grip_b].filter(Boolean);
+      const plan = {
+        min_grip_mm: +fields.min_grip_mm,
+        reach_mm: +fields.reach_mm,
+        bag_min_mm: +fields.bag_min_mm,
+        bag_max_mm: +fields.bag_max_mm,
+        bags: state.bagRanges ?? [],
+        start_grips: startGrips,
+        preferred_frame: fields.preferred_frame ? +fields.preferred_frame : null,
+      };
+      return {kind, cut, plan};
+    }
+    case "pouch-check": {
+      const plan = need(state.dissectionPlan, "Build a cut sequence plan first.");
+      const observed = Object.values(state.observedCuts);
+      if (!observed.length) throw Error("Record at least one observed cut with Use selected as actual.");
+      return {
+        kind, cut: plan.settings.cut, tolerance: +fields.tolerance,
+        pouch: {bag_min_mm: +fields.bag_min_mm, bag_max_mm: +fields.bag_max_mm,
+          bags: state.bagRanges ?? []},
+        observed,
+      };
+    }
     case "cut-verified": return {kind, cut: state.cutOptions, planned: state.cutPlan, actual: needLine()};
     case "frames": case "perforations": case "carrier": return {kind, region};
     case "proof": return {...base, region, tone: state.tone, view: state.mode,
@@ -474,6 +507,10 @@ async function runOperation(kind, element, overrides) {
       state.lastDust = job;
       state.restore.clear();
       state.pickedDust = null;
+      renderPanel();
+    }
+    if (kind === "cut-verified") {
+      state.lastVerifiedCut = job;
       renderPanel();
     }
     showResult(job);
@@ -825,7 +862,53 @@ const actions = {
   addLandmark: perform(addLandmark),
   clearLandmarks: () => { state.landmarks = []; renderPanel(); },
   clearCut: () => { state.cutPlan = null; renderOverlay(); renderPanel(); },
+  refreshStrip: () => { renderPanel(); renderOverlay(); },
   useCut: line => { state.cutPlan = line; renderOverlay(); renderPanel(); toast("Planned cut set. Draw the observed cut, then verify."); },
+  adoptPlan: perform(async job => {
+    state.dissectionPlan = job;
+    state.observedCuts = {};
+    state.cutPlan = null;
+    state.line = null;
+    renderOverlay();
+    renderPanel();
+    toast(`Cut sequence adopted: ${job.result.clamp_moves} clamp move(s), ${job.result.cut_count} cuts.`);
+  }),
+  recordActualCut: perform((boundary, entry) => {
+    const plan = need(state.dissectionPlan, "Build a cut sequence plan first.");
+    state.observedCuts[boundary] = {
+      boundary, planned: entry.plan.line, actual: entry.observed.line,
+    };
+    const plannedLine = plan.result.cuts.find(cut => cut.boundary === boundary);
+    if (plannedLine) state.cutPlan = plannedLine.line;
+    state.line = null;
+    renderOverlay();
+    renderPanel();
+    toast(`Observed cut ${boundary} recorded (${entry.status}). ${Object.keys(state.observedCuts).length} measured.`);
+  }),
+  resetObserved: () => {
+    state.observedCuts = {};
+    state.cutPlan = null;
+    renderOverlay();
+    renderPanel();
+    toast("Observed cuts cleared.");
+  },
+  addBagRange: perform(form => {
+    const value = formValues(form);
+    const frame = +value.bag_frame;
+    const entry = {frame, min_mm: +value.bag_min, max_mm: +value.bag_max};
+    if (!Number.isFinite(frame) || entry.min_mm > entry.max_mm) {
+      throw Error("Enter a frame number with a valid pouch range.");
+    }
+    state.bagRanges = state.bagRanges.filter(item => item.frame !== frame);
+    state.bagRanges.push(entry);
+    state.bagRanges.sort((a, b) => a.frame - b.frame);
+    renderPanel();
+    toast(`Pouch range for frame ${frame} saved.`);
+  }),
+  removeBagRange: frame => {
+    state.bagRanges = state.bagRanges.filter(item => item.frame !== frame);
+    renderPanel();
+  },
   markFrame: perform((box, index) => openMark(null, box, `Frame ${index + 1}`)),
   pickFinding: finding => {
     state.pickedDust = finding.number;
