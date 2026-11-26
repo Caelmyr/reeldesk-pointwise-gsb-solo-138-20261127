@@ -1,0 +1,20 @@
+services:
+  reeldesk:
+    image: ${REELDESK_IMAGE:-solo141-reeldesk:local}
+    network_mode: bridge
+    build:
+      context: .
+    ports:
+      - "127.0.0.1:${REELDESK_BIND_PORT:-18541}:8080"
+    environment:
+      REELDESK_DEMO: ${REELDESK_DEMO:-1}
+    volumes:
+      - catalog:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://localhost:8080/health', timeout=2).close()"]
+      interval: 5s
+      timeout: 3s
+      retries: 8
+      start_period: 4s
+volumes:
+  catalog:

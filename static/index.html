@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#1b1b19">
+  <title>ReelDesk · Film Scan Workbench</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <script src="/static/app.js" type="module"></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="ReelDesk home"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span><span>ReelDesk</span></a>
+    <div class="top-separator"></div>
+    <p class="brand-description">Film scan workbench</p>
+    <div class="top-actions">
+      <button type="button" class="quiet" id="library-open">Roll library</button>
+      <button type="button" class="primary" id="import-open"><span aria-hidden="true">＋</span> Import scan</button>
+    </div>
+  </header>
+  <div class="desk">
+    <aside class="sidebar" aria-label="Scans and controls">
+      <section class="roll-heading">
+        <p class="eyebrow">ACTIVE ROLL</p>
+        <div class="roll-title-row"><h1 id="roll-title">Film archive</h1><button id="roll-menu" class="icon-button" aria-label="Edit active roll">···</button></div>
+        <p id="roll-detail" class="muted"></p>
+      </section>
+      <div class="scan-list" id="scan-list"></div>
+      <div class="sidebar-foot" id="roll-foot"></div>
+    </aside>
+    <main class="workbench" id="workbench" aria-label="Scan workbench">
+      <section class="scan-heading">
+        <div><p class="eyebrow" id="current-type">SCAN VIEWER</p><h2 id="scan-title">Load a scan</h2></div>
+        <div class="scan-actions"><button id="scan-menu" type="button" class="quiet">Scan details</button></div>
+      </section>
+      <section class="view-section" aria-label="Scan preview and selection">
+        <div class="view-bar">
+          <div class="view-modes" id="view-modes" aria-label="Preview mode">
+            <button data-view="positive" class="active" type="button">Positive</button>
+            <button data-view="raw" type="button">Negative</button>
+            <button data-view="density" type="button">Density</button>
+            <button data-view="clip" type="button">Clipping</button>
+          </div>
+          <div class="geometry-tools" id="geometry-tools" aria-label="Selection mode">
+            <button data-tool="box" class="active" type="button" title="Draw a region">□ Region</button>
+            <button data-tool="line" type="button" title="Draw a line">╱ Line</button>
+            <button data-tool="point" type="button" title="Place a point">• Point</button>
+          </div>
+        </div>
+        <div class="film-stage" id="film-stage">
+          <div class="film-canvas" id="film-canvas">
+            <img id="scan-image" alt="Selected scan" draggable="false">
+            <svg id="scan-overlay" aria-label="Draw selection over scan" role="img"></svg>
+          </div>
+          <p id="image-state" class="image-state">Opening catalog…</p>
+        </div>
+        <div class="view-status">
+          <span id="scan-size">—</span>
+          <span id="selection-label">Paint a region to inspect</span>
+          <button type="button" id="clear-selection" class="text-button">Clear selection</button>
+        </div>
+      </section>
+      <section class="marks-section" aria-labelledby="marks-title">
+        <header class="section-title"><div><h3 id="marks-title">Frame index</h3><p id="marks-caption" class="muted">Saved marks on this scan</p></div><button type="button" id="mark-open" class="quiet">＋ Add mark</button></header>
+        <div id="marks" class="marks-rail"></div>
+      </section>
+      <section class="result-section" id="result-section" aria-label="Operation results" hidden></section>
+    </main>
+    <aside class="inspector" aria-label="Scan operations">
+      <div class="inspector-tabs" id="inspector-tabs">
+        <button data-tab="inspect" class="active" type="button">Inspect</button>
+        <button data-tab="repeat" type="button">Repeat</button>
+        <button data-tab="strip" type="button">Strip</button>
+        <button data-tab="archive" type="button">Archive</button>
+      </div>
+      <div id="panel" class="inspector-panel"></div>
+    </aside>
+  </div>
+  <dialog id="dialog"><form id="dialog-form"><div class="dialog-header"><h2 id="dialog-title"></h2><button type="button" id="dialog-close" class="icon-button" aria-label="Close">×</button></div><div id="dialog-body"></div><p id="dialog-error" class="error" role="alert"></p><div id="dialog-footer" class="dialog-footer"></div></form></dialog>
+  <div id="toast" role="status" aria-live="polite" class="toast" hidden></div>
+</body>
+</html>
