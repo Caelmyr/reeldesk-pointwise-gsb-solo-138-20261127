@@ -8,7 +8,8 @@ const state = {
   box: null, line: null, point: null, reference: null, drag: null, activeMark: null,
   peerId: "", alignment: null, alignMethod: "patch", landmarks: [],
   wedge: [], cutPlan: null, cutOptions: {kerf_mm: .16, reserve_mm: .7, retained: "both"},
-  lastDust: null, restore: new Set(), pickedDust: null,
+  lastDust: null, lastRestore: null, restore: new Set(), pickedDust: null,
+  ringLimit: .1, edgeTolerance: .15, edgeMargin: 10, donorRadius: 24,
   calibration: cleanCalibration(), peerCalibration: cleanCalibration(),
   tone: {shadow: .08, highlight: 1.75, gamma: 1, neutralize: false, brightness: 0},
   preview: null, requestId: 0, previewRequest: null, loadId: 0, working: false,
@@ -341,6 +342,7 @@ async function selectScan(scan, {persist = true} = {}) {
   state.calibration = calibrationFor(scan);
   state.peerCalibration = calibrationFor(state.scans.find(item => item.id === state.peerId));
   state.lastDust = null;
+  state.lastRestore = null;
   state.restore.clear();
   state.pickedDust = null;
   state.mode = scan?.role === "scan" ? "positive" : "raw";
@@ -419,7 +421,10 @@ function operationArgs(kind, element, overrides) {
     case "wedge": return {...base, wedge: {
       patches: state.wedge, tolerance: +fields.tolerance, compensate: fields.compensate === "on",
     }};
-    case "dust": return {...base, region: needBox(), survey: {radius: +fields.radius, threshold: +fields.threshold}};
+    case "dust":
+      if (fields.ring_limit) state.ringLimit = +fields.ring_limit;
+      if (fields.donor_radius) state.donorRadius = +fields.donor_radius;
+      return {...base, region: needBox(), survey: {radius: +fields.radius, threshold: +fields.threshold}};
     case "restore": return {kind, ...overrides};
     case "dust-check": return {kind, ...pairWithAlignment(), ...overrides};
     case "registration": {
@@ -472,9 +477,13 @@ async function runOperation(kind, element, overrides) {
     }
     if (kind === "dust") {
       state.lastDust = job;
+      state.lastRestore = null;
       state.restore.clear();
       state.pickedDust = null;
       renderPanel();
+    }
+    if (kind === "restore") {
+      state.lastRestore = job;
     }
     showResult(job);
   } finally {
@@ -796,15 +805,27 @@ function restoreChoices() {
   return runOperation("restore", null, {
     calibration: old.settings.calibration, region: old.settings.region, survey: old.settings.survey,
     findings: [...state.restore].sort((left, right) => left - right).map(number => ({number, state: "restore"})),
+    ring_limit: state.ringLimit,
+    edge_tolerance: state.edgeTolerance,
+    donor_radius: state.donorRadius,
   });
 }
 
 function checkDust() {
   const old = need(state.lastDust, "Run a dust survey first.");
   const selected = need(state.pickedDust, "Select a dust finding in the survey result.");
+  const plan = state.lastRestore?.result?.plan
+    ?? old.settings.repair_plan
+    ?? state.lastRestore?.settings?.repair_plan
+    ?? null;
   return runOperation("dust-check", null, {
     region: old.settings.region, survey: old.settings.survey,
     source_calibration: old.settings.calibration, finding: selected,
+    margin: state.edgeMargin,
+    difference_limit: state.edgeTolerance,
+    edge_tolerance: state.edgeTolerance,
+    restore_job_id: state.lastRestore?.id ?? null,
+    repair_plan: plan,
   });
 }
 

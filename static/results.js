@@ -1,6 +1,24 @@
-import {asPercent, button, describeDate, h, link, metrics, prettyNumber as p, table} from "./ui.js";
+import {asPercent, button, describeDate, h, input, link, metrics, prettyNumber as p, table} from "./ui.js";
 
 const channels = ["R", "G", "B"];
+const edgeStatusChinese = {
+  pass: "通过",
+  "dark-jump": "新变暗跳变",
+  "bright-jump": "新变亮跳变",
+  insufficient: "证据不足 · 待复核",
+};
+const manualReasonChinese = {
+  "no-clean-source-pixels": "无干净实测颗粒源",
+  "outer-ring-density-limit": "外圈密度差超限",
+  "donor-pixel-conflict": "源像素已被另一尘块借用",
+  "selected-patch-overlaps-keep": "修补口占 Keep",
+};
+const verdictChinese = {
+  "repair-edge-pass": "修口边检通过",
+  "edge-jump-exceeds-tolerance": "修口出现超公差新亮/暗跳变",
+  "edge-evidence-review": "部分边口证据不足，待复核",
+  "manual-review": "该块未实际修补，需手工补",
+};
 
 const presentation = {
   density: x => [["Valid RGB pixels", x.valid_rgb], ["Area", `${x.area} px`], ["Median green", p(x.channels.G.median, 4, " D")]],
@@ -16,8 +34,22 @@ const presentation = {
     ["Green difference", p(x.channels.G.median_delta, 4, " D")]],
   residual: x => [["Full RGB overlap", asPercent(x.full_rgb_fraction)], ["Sampled pixels", x.samples], ["Green P95 absolute", p(x.channels.G.p95_absolute, 4, " D")]],
   dust: x => [["Candidates", x.findings.length], ["Usable region", asPercent(x.usable_fraction)], ["Omitted groups", x.cutoff_count]],
-  "dust-check": x => [["Repeat check", x.verdict], ["Local change", p(x.local_difference, 4, " D")], ["Ring witnesses", x.ring]],
-  restore: x => [["Restored pixels", x.restored_pixels], ["Held back", x.unfilled_pixels], ["Findings", x.restored_findings.join(", ")]],
+  "dust-check": x => [
+    ["Repeat check", x.verdict],
+    ["Edge status", x.edge_status ?? "legacy"],
+    ["Local change", p(x.local_difference, 4, " D")],
+    ["New edge jump", p(x.edges?.length ? Math.max(...x.edges.map(e => Math.abs(e.new_jump ?? 0))) : null, 4, " D")],
+    ["Ring witnesses", x.ring],
+  ],
+  restore: x => [
+    ["Measured-grain repairs", `${x.summary?.restored_findings ?? x.restored_findings.length}/${x.summary?.selected_findings ?? "—"}`],
+    ["Manual blocks", (x.manual_findings ?? []).length],
+    ["Restored pixels", x.restored_pixels],
+    ["Held back", x.unfilled_pixels],
+    ["Worst seam D", p(x.summary?.worst_seam_density_difference, 4)],
+    ["Worst outer-ring D", p(x.summary?.worst_ring_density_difference, 4)],
+    ["Findings", (x.restored_findings ?? []).join(", ") || "—"],
+  ],
   grain: x => [["Usable region", asPercent(x.coverage)], ["Measured scales", x.bands.length]],
   cut: x => [["Status", x.status], ["Closest mark", p(x.min_clearance_mm, 3, " mm")], ["Suggested positions", x.candidates.length]],
   "cut-verified": x => [["Status", x.status], ["Largest offset", p(x.offset_mm, 3, " mm")], ["Allowed offset", p(x.allowed_offset_mm, 3, " mm")]],
@@ -103,16 +135,65 @@ function extendedTable(kind, data, state, actions, interactive) {
   }
   if (kind === "calibration") return table(["Row", "Column", "Drift D", "Light change"], data.tiles.map(tile =>
     [tile.row + 1, tile.column + 1, p(tile.density_drift), p(tile.flat_relative_percent, 2, "%")]));
-  if (kind === "dust") return [
-    table(["Finding", "Type", "Pixels", "Severity D", "Opt in"], data.findings.map(item => [
-      interactive ? button(`#${item.number}`, () => actions.pickFinding(item), "text-button") : item.number,
-      item.polarity, item.pixels, p(item.severity), item.can_restore
-        ? (interactive ? h("input", {type: "checkbox", "aria-label": `Restore finding ${item.number}`,
-          onchange: e => actions.toggleRestore(item.number, e.target.checked)}) : "Allowed")
-        : "Protected",
-    ])),
-    interactive && data.findings.some(x => x.can_restore) ? button("Preview chosen retouch", actions.restoreChoices, "quiet") : null,
-  ];
+  if (kind === "dust") {
+    const repairable = data.findings.some(x => x.can_restore);
+    return [
+      table(["Finding", "Type", "Pixels", "Severity D", "Opt in"], data.findings.map(item => [
+        interactive ? button(`#${item.number}`, () => actions.pickFinding(item), "text-button") : item.number,
+        item.polarity, item.pixels, p(item.severity), item.can_restore
+          ? (interactive ? h("input", {type: "checkbox", "aria-label": `Restore finding ${item.number}`,
+            onchange: e => actions.toggleRestore(item.number, e.target.checked)}) : "Allowed")
+          : "Protected",
+      ])),
+      interactive && repairable ? h("div", {class: "donor-limits"},
+        input("ring_limit", "Outer-ring D limit", state.ringLimit, {
+          type: "number", min: "0", max: "1.5", step: ".005",
+          oninput: e => { state.ringLimit = +e.currentTarget.value; },
+          onchange: e => { state.ringLimit = +e.currentTarget.value; },
+        }),
+        input("edge_tolerance", "Repeat edge tolerance D", state.edgeTolerance, {
+          type: "number", min: "0", max: "1.5", step: ".005",
+          oninput: e => { state.edgeTolerance = +e.currentTarget.value; },
+          onchange: e => { state.edgeTolerance = +e.currentTarget.value; },
+        }),
+        button("Preview chosen retouch", actions.restoreChoices, "quiet")) : null,
+    ];
+  }
+  if (kind === "restore") {
+    const assignments = data.plan?.assignments ?? data.assignments ?? [];
+    const manual = data.manual_findings ?? [];
+    const summary = data.summary ?? {};
+    return [
+      h("p", {class: "help"}, data.headline ?? "Measured-grain donor plan."),
+      h("p", {class: "help pass"},
+        `可采用方案：自动补 ${summary.restored_findings ?? assignments.length}/${summary.selected_findings ?? "—"} 块；`
+        + `手工 ${manual.length} 块；最坏修口 D=${p(summary.worst_seam_density_difference, 4)}，`
+        + `外圈限值 D=${p(summary.ring_limit, 3)}。`),
+      assignments.length ? table(
+        ["Dust", "Donor", "Source box", "Ring D", "Seam D"],
+        assignments.map(item => [
+          `#${item.number}`, item.donor_name,
+          `${item.source_box.x},${item.source_box.y} ${item.source_box.w}×${item.source_box.h}`,
+          p(item.ring_density_difference, 4), p(item.seam_density_difference, 4),
+        ])) : h("p", {class: "warning"}, "No block could use a valid matched grain source."),
+      manual.length ? table(["Manual #", "Reason", "Pixels"], manual.map(item => [
+        `#${item.number}`,
+        h("span", {}, item.reason, h("br"), h("small", {class: "muted"}, manualReasonChinese[item.reason] ?? "需手工补")),
+        item.pixels,
+      ])) : null,
+    ];
+  }
+  if (kind === "dust-check" && data.edges?.length) {
+    return [
+      h("p", {class: data.passed ? "help pass" : data.review_required ? "help warning" : "warning"},
+        `${data.edge_check?.verdict ?? data.verdict} · ${verdictChinese[data.verdict] ?? ""}`),
+      table(["Edge", "Pairs", "Repaired jump", "Repeat jump", "New jump", "Status"], data.edges.map(edge => [
+        edge.side, `${edge.pairs}/${edge.required_pairs}`, p(edge.repaired_jump, 4),
+        p(edge.repeat_jump, 4), p(edge.new_jump, 4),
+        h("span", {}, edge.status, h("br"), h("small", {class: "muted"}, edgeStatusChinese[edge.status] ?? "")),
+      ])),
+    ];
+  }
   if (kind === "cut" && data.candidates.length) return table(["Column", "From guide edge", "Clearance", "Choose"],
     data.candidates.map(item => [item.column, p(item.distance_from_guide_left_mm, 3, " mm"), p(item.clearance_mm, 3, " mm"),
       interactive ? button("Set planned cut", () => actions.useCut(item.line), "text-button") : "—"]));

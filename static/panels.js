@@ -57,7 +57,11 @@ function imagingStudies(state, actions) {
   if (kind === "calibration") {
     fields = props("columns-2", num("rows", "Rows", 4, 2, 12), num("columns", "Columns", 8, 2, 18));
   } else if (kind === "dust") {
-    fields = props("columns-2", num("radius", "Grain radius (px)", 5, 2, 24), num("threshold", "Density difference", .12, .015, 1.2, .001));
+    fields = props("columns-2",
+      num("radius", "Grain radius (px)", 5, 2, 24),
+      num("threshold", "Density difference", .12, .015, 1.2, .001),
+      num("ring_limit", "Donor ring limit D", state.ringLimit, 0, 1.5, .005),
+      num("donor_radius", "Donor search px", state.donorRadius, 4, 240));
   } else if (kind === "grain") {
     fields = props("columns-3", [1, 2, 4].map((n, i) => num(`scale${i}`, `Scale ${i + 1}`, n, 1, 10)));
   } else if (kind === "focus") {
@@ -119,6 +123,17 @@ function repeatPass(state, actions) {
       ], "quiet"),
     ),
     section("Check the aligned film", evidence,
+      props("columns-2",
+        input("difference_limit", "Edge jump tolerance D", state.edgeTolerance, {
+          type: "number", min: "0", max: "1.5", step: ".005",
+          oninput: event => { state.edgeTolerance = +event.currentTarget.value; },
+          onchange: event => { state.edgeTolerance = +event.currentTarget.value; },
+        }),
+        input("edge_margin", "Edge margin px", state.edgeMargin, {
+          type: "number", min: "3", max: "48", step: "1",
+          oninput: event => { state.edgeMargin = +event.currentTarget.value; },
+          onchange: event => { state.edgeMargin = +event.currentTarget.value; },
+        })),
       props("stack", button("Read both at point", () => actions.run("compare"), "primary", {disabled: !state.alignment}),
         button("Measure difference", () => actions.run("residual"), "quiet", {disabled: !state.alignment})),
       (state.lastDust && state.alignment) ? button("Repeat-check selected dust", actions.checkDust, "text-button") : null)

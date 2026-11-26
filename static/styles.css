@@ -150,6 +150,10 @@ pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 9px; color: #c8b7
 .list-button:hover { border-color: #987753; }
 .list-button small { color: var(--muted); display: block; margin-top: 2px; }
 .small-table { margin-top: 9px; max-height: 260px; overflow: auto; }
+.donor-limits { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; align-items: end; margin-top: 10px; }
+.donor-limits .quiet { min-height: 31px; }
+.help.pass { color: var(--good); }
+.help.warning, p.warning { color: var(--error); }
 table { width: 100%; border-collapse: collapse; font-size: 11px; }
 td, th { padding: 5px 6px; text-align: left; border-bottom: 1px solid var(--border); }
 th { position: sticky; top: 0; background: var(--panel); color: var(--muted); }

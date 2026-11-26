@@ -252,21 +252,104 @@ class Operations:
         survey_settings, survey, mark_version = self._survey(source, pair.calibrated_source, value)
         number_value = integer(value.get("finding"), "finding", lower=1, upper=200)
         margin = integer(value.get("margin", 10), "margin", lower=3, upper=48)
-        limit = number(value.get("difference_limit", .15), "difference_limit", lower=.025, upper=1)
+        limit_raw = None
+        for key in ("difference_limit", "tolerance", "edge_tolerance", "edge_limit"):
+            if value.get(key) is not None:
+                limit_raw = value[key]
+                break
+        limit = number(limit_raw, "difference_limit", lower=.0, upper=1.5) if limit_raw is not None else .15
+        edge_tolerance = value.get("edge_tolerance", value.get("edge_limit", value.get("seam_tolerance", value.get("tolerance"))))
+        if edge_tolerance is None:
+            edge_tolerance = limit
+        else:
+            edge_tolerance = number(edge_tolerance, "edge_tolerance", lower=.0, upper=1.5)
+        repair = None
+        for key in ("repair_plan", "restore_plan", "restored_plan", "repair", "restoration", "restored", "repaired"):
+            if value.get(key) is not None:
+                repair = value[key]
+                break
+        job_reference = value.get("restore_job_id") or value.get("restore_job") or value.get("repair_job_id")
+        if job_reference is None and isinstance(repair, str):
+            job_reference = repair
+        if job_reference is not None and not isinstance(repair, (dict, list)):
+            repair = self.jobs.get(str(job_reference)).report.result
         report = local_survey_comparison(
-            pair.calibrated_source, pair.calibrated_peer, pair.transform, survey, number_value, margin, limit
+            pair.calibrated_source, pair.calibrated_peer, pair.transform, survey, number_value, margin, limit,
+            repair=repair,
+            edge_tolerance=edge_tolerance,
+            min_edge_samples=value.get("min_edge_samples", 3),
         )
-        settings = {**pair.settings, **survey_settings, "finding": number_value, "margin": margin, "difference_limit": limit}
+        settings = {
+            **pair.settings, **survey_settings, "finding": number_value, "margin": margin,
+            "difference_limit": limit, "edge_tolerance": edge_tolerance,
+        }
+        if isinstance(repair, dict):
+            plan = repair.get("plan", repair)
+            if isinstance(plan, dict):
+                settings["repair_plan"] = plan
         image = marked_survey_image(pair.calibrated_source, survey, selected=number_value)
         return Report("dust-check", settings, report, pair.peer.metadata, (attachment(image, "dust-check"),), mark_version)
 
     def _restore(self, source, value):
         calibration, corrected = self._reading(source, value)
         settings, survey, mark_version = self._survey(source, corrected, value)
-        radius = integer(value.get("support_radius", 12), "support_radius", lower=4, upper=36)
+        radius = integer(value.get("support_radius", value.get("radius", 12)), "support_radius", lower=4, upper=36)
         choices = value.get("findings")
-        result, report = restore_region(corrected, survey, choices, radius)
-        settings.update({"calibration": calibration.as_dict(), "support_radius": radius, "findings": choices})
+        ring_raw = None
+        for key in (
+            "ring_limit", "outer_limit", "limit", "maximum_difference", "max_difference",
+            "outer_density_limit", "outer_difference_limit", "ring_density_limit",
+            "ring_difference_limit", "ring_tolerance", "outer_tolerance",
+            "max_ring_difference", "maximum_ring_difference", "match_limit",
+            "tolerance", "difference_limit",
+        ):
+            if value.get(key) is not None:
+                ring_raw = value[key]
+                break
+        ring_limit = number(ring_raw, "ring_limit", lower=.0, upper=1.5) if ring_raw is not None else .10
+        edge_raw = None
+        for key in (
+            "edge_tolerance", "edge_limit", "edge_difference_limit", "seam_tolerance",
+            "jump_tolerance", "seam_limit", "edge_density_limit", "tolerance",
+        ):
+            if value.get(key) is not None:
+                edge_raw = value[key]
+                break
+        edge_tolerance = number(edge_raw, "edge_tolerance", lower=.0, upper=1.5) if edge_raw is not None else ring_limit
+        donor_radius = integer(value.get("donor_radius", value.get("search_radius", radius * 2)), "donor_radius", lower=4, upper=240)
+        donor_boxes = None
+        for key in ("donor_boxes", "donors", "source_boxes", "grain_sources", "source_patches",
+                    "donor_assignments", "named_sources"):
+            if value.get(key) is not None:
+                donor_boxes = value[key]
+                break
+        marks = self.catalog.list_marks(source.id)
+        protected_boxes = mark_boxes(marks, {"keep", "reference"}, source.size)
+        restore_options = {
+            **value,
+            "ring_limit": ring_limit,
+            "edge_tolerance": edge_tolerance,
+            "donor_radius": donor_radius,
+        }
+        result, report = restore_region(
+            corrected, survey, choices, radius,
+            ring_limit=ring_limit,
+            edge_tolerance=edge_tolerance,
+            donor_radius=donor_radius,
+            donor_boxes=donor_boxes,
+            protected_boxes=protected_boxes,
+            request=restore_options,
+        )
+        settings.update({
+            "calibration": calibration.as_dict(),
+            "support_radius": radius,
+            "findings": choices,
+            "ring_limit": ring_limit,
+            "edge_tolerance": edge_tolerance,
+            "donor_radius": donor_radius,
+            "donor_boxes": donor_boxes,
+            "repair_plan": report["plan"],
+        })
         files = (
             attachment(marked_survey_image(corrected, survey), "before-treatment"),
             attachment(result, "restored-region"),
